@@ -1,0 +1,9 @@
+[package]
+name = "cce-remote"
+version = "0.1.0"
+edition = "2021"
+description = "Phone trackpad + keyboard for the cce desktop: serves a web UI and bridges WebSocket input events to the compositor control socket"
+license = "GPL-3.0"
+
+[dependencies]
+tungstenite = "0.21"

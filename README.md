@@ -1,0 +1,37 @@
+# cce-remote
+
+Use a phone as a trackpad + keyboard for the cce desktop.
+
+A single small server: it serves an embedded web page (touch trackpad +
+keyboard UI) over HTTP on the LAN and bridges the page's WebSocket input
+events into the compositor's control socket — the same channel `ccectl`
+uses, so injection rides the real compositor input path.
+
+## Run
+
+```sh
+make install        # installs cce-remote to ~/.local/bin
+cce-remote          # serves on 0.0.0.0:17017 (or: cce-remote <port>)
+```
+
+Open `http://<this-machine's-LAN-IP>:17017` on the phone. Add it to the
+Home Screen for a fullscreen app feel.
+
+## Controls
+
+- one-finger drag — move the pointer
+- tap — left click; two-finger tap — right click
+- two-finger drag — scroll (natural direction)
+- press-and-hold, then drag — held drag (release on lift)
+- `left` / `right` buttons — explicit clicks
+- top bar — esc/tab/arrows; ctrl/alt/sup are sticky toggles (tap to hold,
+  tap again to release — chords work: ctrl on, tap `c`, ctrl off)
+- ⌨ — summon the phone keyboard (typing goes through a US-layout
+  char→evdev map; iOS `beforeinput` is used, so autocorrect noise is
+  filtered)
+
+## Security
+
+LAN-trust only: anyone who can reach the port controls the desktop. Run it
+on a trusted network, or bind it behind a firewall / tunnel. There is no
+authentication in v1.

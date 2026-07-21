@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>cce remote</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; }
+  html, body { height: 100%; overflow: hidden; background: #14151c; color: #ccccd4;
+               font-family: ui-monospace, Menlo, monospace; }
+  body { display: flex; flex-direction: column;
+         padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+  #bar { display: flex; gap: 6px; padding: 8px; flex-wrap: wrap; }
+  #bar button { flex: 1 1 auto; min-width: 44px; padding: 10px 6px; font-size: 13px;
+                font-family: inherit; color: #ccccd4; background: #23252f;
+                border: 1px solid #2e3140; border-radius: 8px; }
+  #bar button.on { background: #25626c; border-color: #337fc0; }
+  #pad { flex: 1; margin: 0 8px; background: #191b23; border: 1px solid #2e3140;
+         border-radius: 12px; touch-action: none; position: relative; }
+  #pad .hint { position: absolute; inset: 0; display: flex; align-items: center;
+               justify-content: center; color: #4a4d5c; font-size: 12px; text-align: center;
+               pointer-events: none; }
+  #clicks { display: flex; gap: 8px; padding: 8px; }
+  #clicks button { flex: 1; padding: 16px; font-size: 13px; font-family: inherit;
+                   color: #ccccd4; background: #23252f; border: 1px solid #2e3140;
+                   border-radius: 10px; }
+  #clicks button:active, #bar button:active { background: #2c5f69; }
+  #kb { position: absolute; opacity: 0.02; width: 1px; height: 1px; left: -10px; top: -10px; }
+  #status { position: fixed; top: 4px; right: 10px; font-size: 10px; color: #4a4d5c; }
+</style>
+</head>
+<body>
+<div id="status">·</div>
+<div id="bar">
+  <button data-k="1">esc</button>
+  <button data-k="15">tab</button>
+  <button data-mod="29">ctrl</button>
+  <button data-mod="56">alt</button>
+  <button data-mod="125">sup</button>
+  <button data-k="105">←</button>
+  <button data-k="103">↑</button>
+  <button data-k="108">↓</button>
+  <button data-k="106">→</button>
+  <button id="kbtn">⌨</button>
+</div>
+<div id="pad"><div class="hint">drag = move · tap = click · 2-finger drag = scroll<br>2-finger tap = right click · hold = drag</div></div>
+<div id="clicks">
+  <button id="lclick">left</button>
+  <button id="rclick">right</button>
+</div>
+<textarea id="kb" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false"></textarea>
+<script>
+"use strict";
+// ── WebSocket ────────────────────────────────────────────────────────
+let ws = null;
+const status = document.getElementById("status");
+function connect() {
+  ws = new WebSocket("ws://" + location.host + "/ws");
+  ws.onopen = () => { status.textContent = "●"; status.style.color = "#5fbf6f"; };
+  ws.onclose = () => { status.textContent = "○"; status.style.color = "#bf5f5f"; setTimeout(connect, 1000); };
+}
+connect();
+function send(s) { if (ws && ws.readyState === 1) ws.send(s); }
+
+// ── Trackpad ─────────────────────────────────────────────────────────
+const pad = document.getElementById("pad");
+const ACCEL = 1.6, SCROLL = 0.045;
+// Touch state: one finger moves, two fingers scroll; short still touches
+// click; a long-press starts a held drag (release on lift).
+let touches = new Map(), moved = 0, startT = 0, maxFingers = 0;
+let dragging = false, dragTimer = null, pendDx = 0, pendDy = 0, pendSy = 0, flushT = null;
+
+function flush() {
+  flushT = null;
+  if (pendDx || pendDy) { send("m " + (pendDx * ACCEL).toFixed(1) + " " + (pendDy * ACCEL).toFixed(1)); pendDx = pendDy = 0; }
+  if (pendSy) { send("s " + pendSy.toFixed(3) + " 0"); pendSy = 0; }
+}
+function queueFlush() { if (!flushT) flushT = setTimeout(flush, 12); }
+
+pad.addEventListener("touchstart", e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) touches.set(t.identifier, { x: t.clientX, y: t.clientY });
+  maxFingers = Math.max(maxFingers, touches.size);
+  if (touches.size === 1) {
+    moved = 0; startT = Date.now();
+    dragTimer = setTimeout(() => { if (moved < 8) { dragging = true; send("b left down"); navigator.vibrate && navigator.vibrate(15); } }, 350);
+  } else { clearTimeout(dragTimer); }
+}, { passive: false });
+
+pad.addEventListener("touchmove", e => {
+  e.preventDefault();
+  if (touches.size === 1) {
+    const t = e.changedTouches[0], p = touches.get(t.identifier);
+    if (!p) return;
+    pendDx += t.clientX - p.x; pendDy += t.clientY - p.y;
+    moved += Math.abs(t.clientX - p.x) + Math.abs(t.clientY - p.y);
+    touches.set(t.identifier, { x: t.clientX, y: t.clientY });
+    queueFlush();
+  } else if (touches.size === 2) {
+    // scroll: average finger dy, natural direction (content follows finger)
+    let dy = 0, n = 0;
+    for (const t of e.changedTouches) {
+      const p = touches.get(t.identifier);
+      if (p) { dy += t.clientY - p.y; n++; touches.set(t.identifier, { x: t.clientX, y: t.clientY }); }
+    }
+    if (n) { pendSy += (-dy / n) * SCROLL; moved += Math.abs(dy); queueFlush(); }
+  }
+}, { passive: false });
+
+pad.addEventListener("touchend", e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) touches.delete(t.identifier);
+  if (touches.size > 0) return;
+  clearTimeout(dragTimer);
+  flush();
+  if (dragging) { send("b left up"); dragging = false; }
+  else if (moved < 10 && Date.now() - startT < 300) {
+    send(maxFingers >= 2 ? "b right click" : "b left click");
+  }
+  maxFingers = 0;
+}, { passive: false });
+pad.addEventListener("touchcancel", () => { touches.clear(); clearTimeout(dragTimer); if (dragging) { send("b left up"); dragging = false; } maxFingers = 0; });
+
+document.getElementById("lclick").addEventListener("click", () => send("b left click"));
+document.getElementById("rclick").addEventListener("click", () => send("b right click"));
+
+// ── Bar keys + sticky modifiers ──────────────────────────────────────
+for (const b of document.querySelectorAll("#bar button[data-k]"))
+  b.addEventListener("click", () => send("k " + b.dataset.k));
+for (const b of document.querySelectorAll("#bar button[data-mod]"))
+  b.addEventListener("click", () => {
+    const on = b.classList.toggle("on");
+    send((on ? "kd " : "ku ") + b.dataset.mod);
+  });
+
+// ── Keyboard: iOS software keyboard via a hidden textarea ────────────
+// beforeinput is the reliable path on iOS (keydown often reports 229).
+const kb = document.getElementById("kb");
+document.getElementById("kbtn").addEventListener("click", () => {
+  if (document.activeElement === kb) { kb.blur(); } else { kb.focus(); }
+});
+// US-layout char → [evdev keycode, needs shift]
+const KEYS = {};
+"abcdefghijklmnopqrstuvwxyz".split("").forEach((c, i) => {
+  KEYS[c] = [[30,48,46,32,18,33,34,35,23,36,37,38,50,49,24,25,16,19,31,20,22,47,17,45,21,44][i], false];
+  KEYS[c.toUpperCase()] = [KEYS[c][0], true];
+});
+"1234567890".split("").forEach((c, i) => { KEYS[c] = [2 + i, false]; });
+Object.assign(KEYS, {
+  " ": [57,false], "-": [12,false], "=": [13,false], "[": [26,false], "]": [27,false],
+  "\\": [43,false], ";": [39,false], "'": [40,false], "`": [41,false], ",": [51,false],
+  ".": [52,false], "/": [53,false],
+  "!": [2,true], "@": [3,true], "#": [4,true], "$": [5,true], "%": [6,true], "^": [7,true],
+  "&": [8,true], "*": [9,true], "(": [10,true], ")": [11,true], "_": [12,true], "+": [13,true],
+  "{": [26,true], "}": [27,true], "|": [43,true], ":": [39,true], "\"": [40,true],
+  "~": [41,true], "<": [51,true], ">": [52,true], "?": [53,true],
+});
+function typeChar(ch) {
+  const k = KEYS[ch];
+  if (!k) return;
+  if (k[1]) { send("kd 42"); send("k " + k[0]); send("ku 42"); }
+  else { send("k " + k[0]); }
+}
+kb.addEventListener("beforeinput", e => {
+  e.preventDefault();
+  switch (e.inputType) {
+    case "insertText":
+    case "insertReplacementText":
+      for (const ch of (e.data || "")) typeChar(ch);
+      break;
+    case "insertLineBreak": send("k 28"); break;
+    case "deleteContentBackward": send("k 14"); break;
+    case "deleteContentForward": send("k 111"); break;
+  }
+});
+// keep the textarea from accumulating anything sneaky
+setInterval(() => { if (kb.value.length > 0) kb.value = ""; }, 2000);
+</script>
+</body>
+</html>
