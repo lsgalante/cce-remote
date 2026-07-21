@@ -53,16 +53,35 @@
 <textarea id="kb" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false"></textarea>
 <script>
 "use strict";
-// ── WebSocket ────────────────────────────────────────────────────────
-let ws = null;
+// ── WebSocket + pairing ──────────────────────────────────────────────
+// First frame must be `auth <pin>` (the PIN cce-remote prints at startup).
+// Remembered in localStorage after the first successful pairing.
+let ws = null, authed = false;
 const status = document.getElementById("status");
+function askPin(msg) {
+  const pin = window.prompt(msg || "cce-remote pairing PIN (shown in the server terminal):");
+  if (pin) localStorage.setItem("cce-remote-pin", pin.trim());
+  return pin ? pin.trim() : null;
+}
 function connect() {
+  authed = false;
   ws = new WebSocket("ws://" + location.host + "/ws");
-  ws.onopen = () => { status.textContent = "●"; status.style.color = "#5fbf6f"; };
-  ws.onclose = () => { status.textContent = "○"; status.style.color = "#bf5f5f"; setTimeout(connect, 1000); };
+  ws.onopen = () => {
+    const pin = localStorage.getItem("cce-remote-pin") || askPin();
+    if (pin) ws.send("auth " + pin); else ws.close();
+  };
+  ws.onmessage = e => {
+    if (e.data === "auth ok") { authed = true; status.textContent = "●"; status.style.color = "#5fbf6f"; }
+    else if (e.data === "auth fail") {
+      localStorage.removeItem("cce-remote-pin");
+      askPin("Wrong PIN — try again:");
+      // server closed on failure; onclose reconnects with the new PIN
+    }
+  };
+  ws.onclose = () => { authed = false; status.textContent = "○"; status.style.color = "#bf5f5f"; setTimeout(connect, 1000); };
 }
 connect();
-function send(s) { if (ws && ws.readyState === 1) ws.send(s); }
+function send(s) { if (authed && ws && ws.readyState === 1) ws.send(s); }
 
 // ── Trackpad ─────────────────────────────────────────────────────────
 const pad = document.getElementById("pad");
@@ -141,6 +160,13 @@ const kb = document.getElementById("kb");
 document.getElementById("kbtn").addEventListener("click", () => {
   if (document.activeElement === kb) { kb.blur(); } else { kb.focus(); }
 });
+// iOS never fires deleteContentBackward on an EMPTY field — keep sentinel
+// padding in the textarea (cursor at the end) so backspace always has
+// something to "delete". beforeinput preventDefault keeps it untouched;
+// the re-arm below repairs any drift (autocorrect ghosts etc.).
+const SENTINEL = "········";
+function armKb() { kb.value = SENTINEL; kb.setSelectionRange(SENTINEL.length, SENTINEL.length); }
+kb.addEventListener("focus", armKb);
 // US-layout char → [evdev keycode, needs shift]
 const KEYS = {};
 "abcdefghijklmnopqrstuvwxyz".split("").forEach((c, i) => {
@@ -171,12 +197,13 @@ kb.addEventListener("beforeinput", e => {
       for (const ch of (e.data || "")) typeChar(ch);
       break;
     case "insertLineBreak": send("k 28"); break;
-    case "deleteContentBackward": send("k 14"); break;
+    case "deleteContentBackward":
+    case "deleteWordBackward": send("k 14"); break;
     case "deleteContentForward": send("k 111"); break;
   }
 });
-// keep the textarea from accumulating anything sneaky
-setInterval(() => { if (kb.value.length > 0) kb.value = ""; }, 2000);
+// repair sentinel drift while the keyboard is up
+setInterval(() => { if (document.activeElement === kb && kb.value !== SENTINEL) armKb(); }, 1000);
 </script>
 </body>
 </html>

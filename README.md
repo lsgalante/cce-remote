@@ -32,6 +32,9 @@ Home Screen for a fullscreen app feel.
 
 ## Security
 
-LAN-trust only: anyone who can reach the port controls the desktop. Run it
-on a trusted network, or bind it behind a firewall / tunnel. There is no
-authentication in v1.
+Pairing PIN: a persistent 6-digit PIN is generated on first run (printed at
+startup, stored 0600 in `~/.config/cce/cce-remote.pin`). The page asks for
+it once per device and remembers it (localStorage); the server closes any
+WebSocket whose first frame isn't `auth <pin>`, so no input can be injected
+without pairing. Delete the PIN file to rotate it. Traffic is plain HTTP on
+the LAN — for hostile networks, tunnel it.
