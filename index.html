@@ -85,7 +85,8 @@ function send(s) { if (authed && ws && ws.readyState === 1) ws.send(s); }
 
 // ── Trackpad ─────────────────────────────────────────────────────────
 const pad = document.getElementById("pad");
-const ACCEL = 1.6, SCROLL = 0.045;
+// SCROLL is finger-px → wl axis units (~surface px): 0.8 ≈ natural 1:1 feel.
+const ACCEL = 1.6, SCROLL = 0.8;
 // Touch state: one finger moves, two fingers scroll; short still touches
 // click; a long-press starts a held drag (release on lift).
 let touches = new Map(), moved = 0, startT = 0, maxFingers = 0;
