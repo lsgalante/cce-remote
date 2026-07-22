@@ -18,7 +18,10 @@
                 border: 1px solid #2e3140; border-radius: 8px; }
   #bar button.on { background: #25626c; border-color: #337fc0; }
   #pad { flex: 1; margin: 0 8px; background: #191b23; border: 1px solid #2e3140;
-         border-radius: 12px; touch-action: none; position: relative; }
+         border-radius: 12px; touch-action: none; position: relative;
+         /* clip the zoomed/panned view (its wrapper is what scales) to the
+            frame — the clip must be on this NON-transformed ancestor */
+         overflow: hidden; }
   #pad .hint { position: absolute; inset: 0; display: flex; align-items: center;
                justify-content: center; color: #4a4d5c; font-size: 12px; text-align: center;
                pointer-events: none; }
