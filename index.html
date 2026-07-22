@@ -28,6 +28,18 @@
                    border-radius: 10px; }
   #clicks button:active, #bar button:active { background: #2c5f69; }
   #kb { position: absolute; opacity: 0.02; width: 1px; height: 1px; left: -10px; top: -10px; }
+  #switcher { display: none; position: absolute; inset: 8px; overflow-y: auto;
+              background: rgba(20,21,28,0.96); border: 1px solid #2e3140;
+              border-radius: 10px; z-index: 5; -webkit-overflow-scrolling: touch; }
+  #switcher.show { display: block; }
+  #switcher .win { padding: 14px 14px; border-bottom: 1px solid #23252f;
+                   display: flex; gap: 10px; align-items: baseline; }
+  #switcher .win .t { flex: 1; overflow: hidden; text-overflow: ellipsis;
+                      white-space: nowrap; font-size: 14px; }
+  #switcher .win .a { color: #6a6d7c; font-size: 11px; }
+  #switcher .win.focused { background: #1d3a44; }
+  #switcher .win.focused .t { color: #7dffff; }
+  #switcher .empty { padding: 20px; color: #4a4d5c; text-align: center; font-size: 12px; }
   #preview { display: none; margin: 0 8px 6px; padding: 8px 10px; min-height: 36px;
              background: #191b23; border: 1px solid #2e3140; border-radius: 8px;
              font-size: 15px; color: #cfe8e8; white-space: pre-wrap; word-break: break-all; }
@@ -49,10 +61,13 @@
   <button data-k="103">↑</button>
   <button data-k="108">↓</button>
   <button data-k="106">→</button>
+  <button id="wbtn">☰</button>
   <button id="kbtn">⌨</button>
 </div>
 <div id="preview"></div>
-<div id="pad"><div class="hint">drag = move · tap = click · 2-finger drag = scroll<br>2-finger tap = right click · hold = drag</div></div>
+<div id="pad"><div class="hint">drag = move · tap = click · 2-finger drag = scroll<br>2-finger tap = right click · hold = drag</div>
+  <div id="switcher"></div>
+</div>
 <div id="clicks">
   <button id="lclick">left</button>
   <button id="rclick">right</button>
@@ -78,7 +93,8 @@ function connect() {
     if (pin) ws.send("auth " + pin); else ws.close();
   };
   ws.onmessage = e => {
-    if (e.data === "auth ok") { authed = true; status.textContent = "●"; status.style.color = "#5fbf6f"; }
+    if (typeof e.data === "string" && e.data.startsWith("windows ")) { renderSwitcher(e.data.slice(8)); }
+    else if (e.data === "auth ok") { authed = true; status.textContent = "●"; status.style.color = "#5fbf6f"; }
     else if (e.data === "auth fail") {
       localStorage.removeItem("cce-remote-pin");
       askPin("Wrong PIN — try again:");
@@ -92,6 +108,9 @@ function send(s) { if (authed && ws && ws.readyState === 1) ws.send(s); }
 
 // ── Trackpad ─────────────────────────────────────────────────────────
 const pad = document.getElementById("pad");
+// forward decls used by the pad handlers; the panel is wired further down
+function swContains(el) { return document.getElementById("switcher").contains(el); }
+function swHide() { document.getElementById("switcher").classList.remove("show"); }
 // SCROLL is finger-px → wl axis units (~surface px): 0.8 ≈ natural 1:1 feel.
 const ACCEL = 1.6, SCROLL = 0.8;
 // Touch state: one finger moves, two fingers scroll; short still touches
@@ -107,6 +126,10 @@ function flush() {
 function queueFlush() { if (!flushT) flushT = setTimeout(flush, 12); }
 
 pad.addEventListener("touchstart", e => {
+  // Touches on the window-switcher panel are its own (row taps, list
+  // scrolling) — never trackpad input. Any other pad touch dismisses it.
+  if (swContains(e.target)) return;
+  swHide();
   e.preventDefault();
   for (const t of e.changedTouches) touches.set(t.identifier, { x: t.clientX, y: t.clientY });
   maxFingers = Math.max(maxFingers, touches.size);
@@ -117,6 +140,7 @@ pad.addEventListener("touchstart", e => {
 }, { passive: false });
 
 pad.addEventListener("touchmove", e => {
+  if (swContains(e.target)) return;
   e.preventDefault();
   if (touches.size === 1) {
     const t = e.changedTouches[0], p = touches.get(t.identifier);
@@ -137,6 +161,7 @@ pad.addEventListener("touchmove", e => {
 }, { passive: false });
 
 pad.addEventListener("touchend", e => {
+  if (swContains(e.target)) return;
   e.preventDefault();
   for (const t of e.changedTouches) touches.delete(t.identifier);
   if (touches.size > 0) return;
@@ -152,6 +177,36 @@ pad.addEventListener("touchcancel", () => { touches.clear(); clearTimeout(dragTi
 
 document.getElementById("lclick").addEventListener("click", () => send("b left click"));
 document.getElementById("rclick").addEventListener("click", () => send("b right click"));
+
+// ── Window switcher ──────────────────────────────────────────────────
+const switcher = document.getElementById("switcher");
+document.getElementById("wbtn").addEventListener("click", () => {
+  if (switcher.classList.contains("show")) { switcher.classList.remove("show"); return; }
+  send("wl"); // reply renders + shows the panel
+});
+function renderSwitcher(json) {
+  let wins = [];
+  try { wins = JSON.parse(json); } catch (_) {}
+  // real app windows only: no status-bar modules, no child surfaces
+  wins = wins.filter(w => w.mode !== "Status" && !w.has_parent && !w.minimized);
+  switcher.innerHTML = "";
+  if (!wins.length) {
+    switcher.innerHTML = '<div class="empty">no windows</div>';
+  }
+  for (const w of wins) {
+    const row = document.createElement("div");
+    row.className = "win" + (w.focused ? " focused" : "");
+    const t = document.createElement("span"); t.className = "t"; t.textContent = w.title || w.app_id;
+    const a = document.createElement("span"); a.className = "a"; a.textContent = w.app_id;
+    row.append(t, a);
+    row.addEventListener("click", () => {
+      send("wf " + w.id);
+      swHide();
+    });
+    switcher.appendChild(row);
+  }
+  switcher.classList.add("show");
+}
 
 // ── Bar keys + sticky modifiers ──────────────────────────────────────
 for (const b of document.querySelectorAll("#bar button[data-k]"))

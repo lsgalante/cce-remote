@@ -21,7 +21,7 @@
 //! event is accepted; anything else closes the connection. The page remembers
 //! the PIN in localStorage after the first pairing.
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
@@ -73,26 +73,25 @@ fn load_or_create_pin() -> std::io::Result<String> {
     Ok(pin)
 }
 
-/// One persistent line-oriented connection to the compositor's control socket.
-struct Control {
-    stream: BufReader<UnixStream>,
+/// One control-socket command, one connection: the compositor's IPC server is
+/// one-shot (read → reply → close), so a fresh connect per command is the
+/// correct framing — the reply is everything until EOF (commands like
+/// `windows --json` reply with multiple lines).
+fn control_command(cmd: &str) -> std::io::Result<String> {
+    let mut s = UnixStream::connect(control_socket_path())?;
+    s.write_all(cmd.as_bytes())?;
+    s.write_all(b"\n")?;
+    let mut reply = String::new();
+    s.read_to_string(&mut reply)?;
+    Ok(reply)
 }
 
-impl Control {
-    fn connect() -> std::io::Result<Self> {
-        let s = UnixStream::connect(control_socket_path())?;
-        Ok(Self { stream: BufReader::new(s) })
-    }
-
-    fn send(&mut self, cmd: &str) -> std::io::Result<()> {
-        self.stream.get_mut().write_all(cmd.as_bytes())?;
-        self.stream.get_mut().write_all(b"\n")?;
-        // Drain the reply line so the socket never backs up. Errors in the
-        // reply text are ignored — input injection is fire-and-forget.
-        let mut reply = String::new();
-        self.stream.read_line(&mut reply)?;
-        Ok(())
-    }
+/// True for tokens safe to splice into a control command (window queries:
+/// numeric ids or app_ids). The WS payload is untrusted — nothing unvalidated
+/// reaches the compositor.
+fn safe_token(t: &str) -> bool {
+    !t.is_empty() && t.len() <= 128
+        && t.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':'))
 }
 
 /// Translate one WS frame into a control-socket command. Returns None for
@@ -126,9 +125,24 @@ fn translate(frame: &str) -> Option<String> {
         "k" => format!("keypress {}", it.next()?.parse::<u32>().ok()?),
         "kd" => format!("key-down {}", it.next()?.parse::<u32>().ok()?),
         "ku" => format!("key-up {}", it.next()?.parse::<u32>().ok()?),
+        "wf" => {
+            let target = it.next()?;
+            if !safe_token(target) {
+                return None;
+            }
+            format!("focus-window {target}")
+        }
         _ => return None,
     };
     Some(cmd)
+}
+
+/// The `windows --json` reply (one JSON object per line) as a JSON array
+/// for the page's switcher.
+fn window_list_json() -> String {
+    let reply = control_command("windows --json").unwrap_or_default();
+    let objs: Vec<&str> = reply.lines().filter(|l| l.trim_start().starts_with('{')).collect();
+    format!("windows [{}]", objs.join(","))
 }
 
 fn handle_ws(stream: TcpStream, pin: &str) {
@@ -157,28 +171,16 @@ fn handle_ws(stream: TcpStream, pin: &str) {
     }
     let _ = ws.get_ref().set_read_timeout(None);
     let _ = ws.send(tungstenite::Message::Text("auth ok".into()));
-    let mut control = match Control::connect() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("[cce-remote] control socket unavailable: {e}");
-            let _ = ws.close(None);
-            return;
-        }
-    };
     println!("[cce-remote] client connected: {peer}");
     loop {
         match ws.read() {
             Ok(msg) => {
                 if let tungstenite::Message::Text(text) = msg {
-                    if let Some(cmd) = translate(&text) {
-                        if control.send(&cmd).is_err() {
-                            // Compositor went away; try one reconnect.
-                            match Control::connect() {
-                                Ok(c) => control = c,
-                                Err(_) => break,
-                            }
-                            let _ = control.send(&cmd);
-                        }
+                    if text.trim() == "wl" {
+                        // Window-list request: the one message with a reply.
+                        let _ = ws.send(tungstenite::Message::Text(window_list_json()));
+                    } else if let Some(cmd) = translate(&text) {
+                        let _ = control_command(&cmd);
                     }
                 }
             }
