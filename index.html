@@ -28,6 +28,12 @@
                    border-radius: 10px; }
   #clicks button:active, #bar button:active { background: #2c5f69; }
   #kb { position: absolute; opacity: 0.02; width: 1px; height: 1px; left: -10px; top: -10px; }
+  #preview { display: none; margin: 0 8px 6px; padding: 8px 10px; min-height: 36px;
+             background: #191b23; border: 1px solid #2e3140; border-radius: 8px;
+             font-size: 15px; color: #cfe8e8; white-space: pre-wrap; word-break: break-all; }
+  #preview.show { display: block; }
+  #preview.show::after { content: "▍"; color: #7dffff; animation: blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
   #status { position: fixed; top: 4px; right: 10px; font-size: 10px; color: #4a4d5c; }
 </style>
 </head>
@@ -45,6 +51,7 @@
   <button data-k="106">→</button>
   <button id="kbtn">⌨</button>
 </div>
+<div id="preview"></div>
 <div id="pad"><div class="hint">drag = move · tap = click · 2-finger drag = scroll<br>2-finger tap = right click · hold = drag</div></div>
 <div id="clicks">
   <button id="lclick">left</button>
@@ -167,7 +174,16 @@ document.getElementById("kbtn").addEventListener("click", () => {
 // the re-arm below repairs any drift (autocorrect ghosts etc.).
 const SENTINEL = "········";
 function armKb() { kb.value = SENTINEL; kb.setSelectionRange(SENTINEL.length, SENTINEL.length); }
-kb.addEventListener("focus", armKb);
+// Local echo of what's been typed — cleared on Enter or keyboard close.
+// (The target app shows the real text; this is feedback for eyes-on-phone.)
+const preview = document.getElementById("preview");
+let typed = "";
+function updPreview() {
+  preview.textContent = typed;
+  preview.classList.toggle("show", document.activeElement === kb);
+}
+kb.addEventListener("focus", () => { armKb(); updPreview(); });
+kb.addEventListener("blur", () => { typed = ""; updPreview(); });
 // US-layout char → [evdev keycode, needs shift]
 const KEYS = {};
 "abcdefghijklmnopqrstuvwxyz".split("").forEach((c, i) => {
@@ -189,6 +205,7 @@ function typeChar(ch) {
   if (!k) return;
   if (k[1]) { send("kd 42"); send("k " + k[0]); send("ku 42"); }
   else { send("k " + k[0]); }
+  typed += ch;
 }
 kb.addEventListener("beforeinput", e => {
   e.preventDefault();
@@ -197,11 +214,19 @@ kb.addEventListener("beforeinput", e => {
     case "insertReplacementText":
       for (const ch of (e.data || "")) typeChar(ch);
       break;
-    case "insertLineBreak": send("k 28"); break;
-    case "deleteContentBackward":
-    case "deleteWordBackward": send("k 14"); break;
+    case "insertLineBreak": send("k 28"); typed = ""; break;
+    case "deleteContentBackward": send("k 14"); typed = typed.slice(0, -1); break;
+    case "deleteWordBackward": {
+      // one backspace per removed char, so desktop and preview stay in sync
+      const rest = typed.replace(/\S+\s*$/, "");
+      const n = Math.max(1, typed.length - rest.length);
+      for (let i = 0; i < n; i++) send("k 14");
+      typed = rest;
+      break;
+    }
     case "deleteContentForward": send("k 111"); break;
   }
+  updPreview();
 });
 // repair sentinel drift while the keyboard is up
 setInterval(() => { if (document.activeElement === kb && kb.value !== SENTINEL) armKb(); }, 1000);
