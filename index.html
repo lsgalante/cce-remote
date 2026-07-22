@@ -32,13 +32,13 @@
             object-fit: contain; background: #0c0d12; border-radius: 12px; z-index: 2; }
   #pad.view #screen { display: block; }
   #pad.view .hint { display: none; }
-  #switcher { display: none; position: absolute; inset: 8px; overflow-y: auto;
+  #switcher, #menu { display: none; position: absolute; inset: 8px; overflow-y: auto;
               background: rgba(20,21,28,0.96); border: 1px solid #2e3140;
               border-radius: 10px; z-index: 5; -webkit-overflow-scrolling: touch; }
-  #switcher.show { display: block; }
-  #switcher .win { padding: 14px 14px; border-bottom: 1px solid #23252f;
+  #switcher.show, #menu.show { display: block; }
+  #switcher .win, #menu .win { padding: 14px 14px; border-bottom: 1px solid #23252f;
                    display: flex; gap: 10px; align-items: baseline; }
-  #switcher .win .t { flex: 1; overflow: hidden; text-overflow: ellipsis;
+  #switcher .win .t, #menu .win .t { flex: 1; overflow: hidden; text-overflow: ellipsis;
                       white-space: nowrap; font-size: 14px; }
   #switcher .win .a { color: #6a6d7c; font-size: 11px; }
   #switcher .win.focused { background: #1d3a44; }
@@ -66,13 +66,14 @@
   <button data-k="108">↓</button>
   <button data-k="106">→</button>
   <button id="wbtn">☰</button>
-  <button id="vbtn">🖥</button>
+  <button id="mbtn">⋯</button>
   <button id="kbtn">⌨</button>
 </div>
 <div id="preview"></div>
 <div id="pad"><div class="hint">drag = move · tap = click · 2-finger drag = scroll<br>2-finger tap = right click · hold = drag</div>
   <img id="screen" draggable="false">
   <div id="switcher"></div>
+  <div id="menu"></div>
 </div>
 <div id="clicks">
   <button id="lclick">left</button>
@@ -114,9 +115,16 @@ function send(s) { if (authed && ws && ws.readyState === 1) ws.send(s); }
 
 // ── Trackpad ─────────────────────────────────────────────────────────
 const pad = document.getElementById("pad");
-// forward decls used by the pad handlers; the panel is wired further down
-function swContains(el) { return document.getElementById("switcher").contains(el); }
-function swHide() { document.getElementById("switcher").classList.remove("show"); }
+// forward decls used by the pad handlers; the panels are wired further down.
+// "sw" now means any overlay panel (window switcher or the ⋯ menu).
+function swContains(el) {
+  return document.getElementById("switcher").contains(el)
+      || document.getElementById("menu").contains(el);
+}
+function swHide() {
+  document.getElementById("switcher").classList.remove("show");
+  document.getElementById("menu").classList.remove("show");
+}
 // SCROLL is finger-px → wl axis units (~surface px): 0.8 ≈ natural 1:1 feel.
 const ACCEL = 1.6, SCROLL = 0.8;
 // Touch state: one finger moves, two fingers scroll; short still touches
@@ -226,13 +234,13 @@ pad.addEventListener("touchcancel", () => { touches.clear(); clearTimeout(dragTi
 document.getElementById("lclick").addEventListener("click", () => send("b left click"));
 document.getElementById("rclick").addEventListener("click", () => send("b right click"));
 
-// ── View-mode toggle ─────────────────────────────────────────────────
-const vbtn = document.getElementById("vbtn");
-vbtn.addEventListener("click", () => {
-  viewMode = !viewMode;
-  vbtn.classList.toggle("on", viewMode);
+// ── View mode + the ⋯ menu ───────────────────────────────────────────
+const mbtn = document.getElementById("mbtn");
+function setViewMode(on) {
+  if (viewMode === on) return;
+  viewMode = on;
+  mbtn.classList.toggle("on", viewMode);
   pad.classList.toggle("view", viewMode);
-  swHide();
   if (viewMode) {
     const pin = localStorage.getItem("cce-remote-pin") || "";
     screenEl.src = "/stream?pin=" + encodeURIComponent(pin);
@@ -242,6 +250,31 @@ vbtn.addEventListener("click", () => {
     clearInterval(rectTimer);
     screenEl.src = "data:,"; // closes the stream connection
   }
+}
+const menuEl = document.getElementById("menu");
+function menuRow(label, danger, fn) {
+  const row = document.createElement("div");
+  row.className = "win";
+  const t = document.createElement("span");
+  t.className = "t";
+  t.textContent = label;
+  if (danger) t.style.color = "#e08a8a";
+  row.appendChild(t);
+  row.addEventListener("click", () => { swHide(); fn(); });
+  menuEl.appendChild(row);
+}
+mbtn.addEventListener("click", () => {
+  if (menuEl.classList.contains("show")) { swHide(); return; }
+  swHide();
+  menuEl.innerHTML = "";
+  menuRow(viewMode ? "Switch to trackpad" : "Show focused window (live view)", false,
+    () => setViewMode(!viewMode));
+  menuRow("Restart compositor", true, () => {
+    if (window.confirm("Restart the compositor? Every app in the session will close, then the session relaunches.")) {
+      send("cmd restart-compositor");
+    }
+  });
+  menuEl.classList.add("show");
 });
 
 // ── Window switcher ──────────────────────────────────────────────────

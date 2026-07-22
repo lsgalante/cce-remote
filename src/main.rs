@@ -135,6 +135,11 @@ fn translate(frame: &str) -> Option<String> {
             }
             format!("focus-window {target}")
         }
+        // Named commands, individually whitelisted — never pass-through.
+        "cmd" => match it.next()? {
+            "restart-compositor" => "restart-compositor".to_string(),
+            _ => return None,
+        },
         _ => return None,
     };
     Some(cmd)
