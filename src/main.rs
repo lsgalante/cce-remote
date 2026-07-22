@@ -27,6 +27,7 @@ use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 mod screencopy;
+mod winstream;
 
 const INDEX_HTML: &str = include_str!("../index.html");
 const DEFAULT_PORT: u16 = 17017;
@@ -280,8 +281,12 @@ fn handle_stream(mut stream: TcpStream, request_head: &str, pin: &str) {
     {
         return;
     }
-    // Primary: persistent damage-driven screencopy (idle = zero frames,
-    // active = compositor-paced). Fallback: the original grim loop.
+    // Source preference: the compositor's window stream (per-window damage,
+    // follows focus, works off-screen) → screencopy (output damage) → grim.
+    match winstream::stream_mjpeg(&mut stream) {
+        Ok(()) => return, // client disconnected
+        Err(e) => eprintln!("[cce-remote] window stream unavailable ({e}), trying screencopy"),
+    }
     let rect = || focused_window().map(|(_, x, y, w, h)| (x as i32, y as i32, w as i32, h as i32));
     match screencopy::stream_mjpeg(&mut stream, rect) {
         Ok(()) => return, // client disconnected

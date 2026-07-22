@@ -267,10 +267,26 @@ fn encode_jpeg(
     (w, h, stride, format): (u32, u32, u32, wl_shm::Format),
 ) -> Result<Vec<u8>, String> {
     // byte offsets of R,G,B within each little-endian 32-bit pixel
-    let (ri, gi, bi) = match format {
+    let rgb_at = match format {
         wl_shm::Format::Xrgb8888 | wl_shm::Format::Argb8888 => (2usize, 1usize, 0usize),
         _ => (0usize, 1usize, 2usize), // Xbgr8888 / Abgr8888
     };
+    downscale_encode(map, w, h, stride, rgb_at)
+}
+
+/// Shared by both frame sources (screencopy shm and the compositor's
+/// window-stream RGBA): box-downscale 32-bit pixels to ≤ MAX_EDGE and JPEG
+/// them. `rgb_at` gives the byte offsets of R,G,B within each 4-byte pixel.
+pub fn downscale_encode(
+    data: &[u8],
+    w: u32,
+    h: u32,
+    stride: u32,
+    (ri, gi, bi): (usize, usize, usize),
+) -> Result<Vec<u8>, String> {
+    if w == 0 || h == 0 || (stride * h) as usize > data.len() {
+        return Err("bad frame dimensions".into());
+    }
     let f = ((w.max(h) + MAX_EDGE - 1) / MAX_EDGE).max(1);
     let (ow, oh) = (w / f, h / f);
     let mut rgb = Vec::with_capacity((ow * oh * 3) as usize);
@@ -282,9 +298,9 @@ fn encode_jpeg(
                 let row = ((oy * f + sy) * stride) as usize;
                 for sx in 0..f {
                     let px = row + ((ox * f + sx) * 4) as usize;
-                    r += map[px + ri] as u32;
-                    g += map[px + gi] as u32;
-                    b += map[px + bi] as u32;
+                    r += data[px + ri] as u32;
+                    g += data[px + gi] as u32;
+                    b += data[px + bi] as u32;
                 }
             }
             rgb.push((r / fsq) as u8);
