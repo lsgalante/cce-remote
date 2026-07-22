@@ -186,9 +186,9 @@ function clampPan() {
 // view mode draws its own marker: poll pointer-location over the WS and
 // place the ring via the inverse of the tap mapping.
 const vcursor = document.getElementById("vcursor");
-function updateCursorMarker(coords) {
+let ptr = null; // last known pointer position in layout px (from ploc + prediction)
+function placeMarker(lx, ly) {
   if (!viewMode || !winRect || !screenEl.naturalWidth) { vcursor.classList.remove("on"); return; }
-  const [lx, ly] = coords.split(" ").map(Number);
   const u = (lx - winRect.x) / winRect.w, v = (ly - winRect.y) / winRect.h;
   if (!(u >= 0 && u <= 1 && v >= 0 && v <= 1)) { vcursor.classList.remove("on"); return; }
   const box = screenEl.getBoundingClientRect();
@@ -198,6 +198,21 @@ function updateCursorMarker(coords) {
   vcursor.style.left = (box.left - padBox.left + (box.width - dw) / 2 + u * dw) + "px";
   vcursor.style.top = (box.top - padBox.top + (box.height - dh) / 2 + v * dh) + "px";
   vcursor.classList.add("on");
+}
+// Server truth (poll): reconcile the predicted position.
+function updateCursorMarker(coords) {
+  const [lx, ly] = coords.split(" ").map(Number);
+  ptr = { x: lx, y: ly };
+  placeMarker(lx, ly);
+}
+// Client prediction: move the marker with the finger immediately, so pointer
+// motion feels instant even though the window frame is damage-gated and won't
+// repaint just because the cursor moved. Reconciled by the next ploc poll.
+function predictMarker(dLx, dLy) {
+  if (!ptr || !winRect) return;
+  ptr.x = Math.min(Math.max(ptr.x + dLx, winRect.x), winRect.x + winRect.w);
+  ptr.y = Math.min(Math.max(ptr.y + dLy, winRect.y), winRect.y + winRect.h);
+  placeMarker(ptr.x, ptr.y);
 }
 
 // touch point (viewport px) → layout px inside the focused window,
@@ -252,8 +267,11 @@ pad.addEventListener("touchmove", e => {
     const t = e.changedTouches[0], p = touches.get(t.identifier);
     if (!p) return;
     // one-finger drag = relative pointer motion, in BOTH modes
-    pendDx += t.clientX - p.x; pendDy += t.clientY - p.y; queueFlush();
-    moved += Math.abs(t.clientX - p.x) + Math.abs(t.clientY - p.y);
+    const rdx = t.clientX - p.x, rdy = t.clientY - p.y;
+    pendDx += rdx; pendDy += rdy; queueFlush();
+    // view mode: predict the cursor marker instantly (same accel as the send)
+    if (viewMode) predictMarker(rdx * ACCEL, rdy * ACCEL);
+    moved += Math.abs(rdx) + Math.abs(rdy);
     touches.set(t.identifier, { x: t.clientX, y: t.clientY });
   } else if (touches.size === 2) {
     let dy = 0, n = 0;
@@ -329,7 +347,7 @@ function setViewMode(on) {
     streamStart();
     send("wl"); // prime winRect
     rectTimer = setInterval(() => send("wl"), 2000);
-    cursorTimer = setInterval(() => send("pl"), 250);
+    cursorTimer = setInterval(() => send("pl"), 120);
     // Reconnect if no frame has loaded for a while (the compositor keepalives
     // every ≤15s, so ~20s of silence means the connection is dead, not idle).
     watchdog = setInterval(() => {

@@ -27,8 +27,8 @@ use wayland_protocols_wlr::screencopy::v1::client::{
 
 /// Longest edge of the encoded frame, in px — the downscale factor is chosen
 /// per frame to stay under this.
-const MAX_EDGE: u32 = 700;
-const JPEG_QUALITY: u8 = 70;
+const MAX_EDGE: u32 = 560;
+const JPEG_QUALITY: u8 = 60;
 
 #[derive(Default)]
 struct CapState {
