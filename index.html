@@ -124,24 +124,15 @@ const ACCEL = 1.6, SCROLL = 0.8;
 let touches = new Map(), moved = 0, startT = 0, maxFingers = 0, startX = 0, startY = 0;
 let dragging = false, dragTimer = null, pendDx = 0, pendDy = 0, pendSy = 0, flushT = null;
 
-// ── Window view mode: the pad shows the focused window; taps click it ──
-let viewMode = false, winRect = null, shotTimer = null, shotBusy = false;
+// ── Window view mode: live MJPEG stream of the focused window; taps
+// click it. The <img> renders /stream (multipart/x-mixed-replace)
+// natively; winRect for tap mapping is kept fresh by polling `wl` over
+// the WS (the stream follows focus server-side).
+let viewMode = false, winRect = null, rectTimer = null;
 const screenEl = document.getElementById("screen");
-async function refreshShot() {
-  if (!viewMode || shotBusy) return;
-  shotBusy = true;
-  try {
-    const r = await fetch("/shot", { headers: { "X-Pin": localStorage.getItem("cce-remote-pin") || "" }, cache: "no-store" });
-    if (r.ok) {
-      const xw = (r.headers.get("X-Win") || "").split(" ").map(Number);
-      if (xw.length === 5) winRect = { id: xw[0], x: xw[1], y: xw[2], w: xw[3], h: xw[4] };
-      const url = URL.createObjectURL(await r.blob());
-      const old = screenEl.src;
-      screenEl.onload = () => { if (old && old.startsWith("blob:")) URL.revokeObjectURL(old); };
-      screenEl.src = url;
-    }
-  } catch (_) {}
-  shotBusy = false;
+function updateRect(wins) {
+  const f = wins.find(w => w.focused && w.mode !== "Status");
+  if (f) winRect = { id: f.id, x: f.x, y: f.y, w: f.w, h: f.h };
 }
 // touch point (viewport px) → layout px inside the focused window,
 // accounting for the contain-fit letterbox. null when off the image.
@@ -180,7 +171,7 @@ pad.addEventListener("touchstart", e => {
       if (viewMode) {
         // long-press in view mode = right click at the spot
         const m = mapToWindow(startX, startY);
-        if (m) { send("tapr " + m[0] + " " + m[1]); setTimeout(refreshShot, 450); navigator.vibrate && navigator.vibrate(15); }
+        if (m) { send("tapr " + m[0] + " " + m[1]); navigator.vibrate && navigator.vibrate(15); }
       } else {
         dragging = true; send("b left down"); navigator.vibrate && navigator.vibrate(15);
       }
@@ -222,13 +213,11 @@ pad.addEventListener("touchend", e => {
       if (maxFingers < 2) {
         const t = e.changedTouches[0];
         const m = mapToWindow(t.clientX, t.clientY);
-        if (m) { send("tap " + m[0] + " " + m[1]); setTimeout(refreshShot, 450); }
+        if (m) send("tap " + m[0] + " " + m[1]);
       }
     } else {
       send(maxFingers >= 2 ? "b right click" : "b left click");
     }
-  } else if (viewMode && maxFingers >= 2) {
-    setTimeout(refreshShot, 450); // scrolled the window — show the result
   }
   maxFingers = 0;
 }, { passive: false });
@@ -244,19 +233,31 @@ vbtn.addEventListener("click", () => {
   vbtn.classList.toggle("on", viewMode);
   pad.classList.toggle("view", viewMode);
   swHide();
-  if (viewMode) { refreshShot(); shotTimer = setInterval(refreshShot, 1500); }
-  else { clearInterval(shotTimer); }
+  if (viewMode) {
+    const pin = localStorage.getItem("cce-remote-pin") || "";
+    screenEl.src = "/stream?pin=" + encodeURIComponent(pin);
+    send("wl"); // prime winRect
+    rectTimer = setInterval(() => send("wl"), 2000);
+  } else {
+    clearInterval(rectTimer);
+    screenEl.src = "data:,"; // closes the stream connection
+  }
 });
 
 // ── Window switcher ──────────────────────────────────────────────────
 const switcher = document.getElementById("switcher");
+let wantSwitcher = false;
 document.getElementById("wbtn").addEventListener("click", () => {
   if (switcher.classList.contains("show")) { switcher.classList.remove("show"); return; }
+  wantSwitcher = true;
   send("wl"); // reply renders + shows the panel
 });
 function renderSwitcher(json) {
   let wins = [];
   try { wins = JSON.parse(json); } catch (_) {}
+  updateRect(wins); // every wl reply refreshes the tap-mapping rect
+  if (!wantSwitcher) return;
+  wantSwitcher = false;
   // real app windows only: no status-bar modules, no child surfaces
   wins = wins.filter(w => w.mode !== "Status" && !w.has_parent && !w.minimized);
   switcher.innerHTML = "";

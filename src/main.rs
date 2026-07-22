@@ -252,7 +252,76 @@ fn handle_ws(stream: TcpStream, pin: &str) {
     println!("[cce-remote] client disconnected: {peer}");
 }
 
+/// MJPEG stream of the focused window: multipart/x-mixed-replace with one
+/// JPEG part per grim capture (region = the focused window's layout rect,
+/// re-resolved every few frames so the stream follows focus). ~3 fps for a
+/// full-size window — the screencopy dominates, not the encode. Runs until
+/// the client closes the socket. PIN via X-Pin header or ?pin= query (an
+/// <img src> can't carry headers).
+fn handle_stream(mut stream: TcpStream, request_head: &str, pin: &str) {
+    let pin_ok = request_head.lines().any(|l| {
+        let lower = l.to_ascii_lowercase();
+        lower.starts_with("x-pin:") && l[6..].trim() == pin
+    }) || request_head
+        .split_whitespace()
+        .nth(1)
+        .is_some_and(|target| target.contains(&format!("pin={pin}")));
+    if !pin_ok {
+        let _ = write!(stream, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        return;
+    }
+    if write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=frame\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
+    )
+    .is_err()
+    {
+        return;
+    }
+    let mut win = focused_window();
+    let mut tick = 0u32;
+    loop {
+        if tick % 4 == 0 {
+            if let Some(w) = focused_window() {
+                win = Some(w);
+            }
+        }
+        tick = tick.wrapping_add(1);
+        let Some((_, x, y, w, h)) = win else {
+            std::thread::sleep(Duration::from_millis(400));
+            continue;
+        };
+        let out = std::process::Command::new("grim")
+            .args([
+                "-g",
+                &format!("{},{} {}x{}", x as i32, y as i32, w as i32, h as i32),
+                "-t", "jpeg", "-q", "65", "-s", "0.5", "-",
+            ])
+            .output();
+        match out {
+            Ok(o) if o.status.success() && o.stdout.starts_with(&[0xff, 0xd8]) => {
+                let part = format!(
+                    "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
+                    o.stdout.len()
+                );
+                if stream.write_all(part.as_bytes()).is_err()
+                    || stream.write_all(&o.stdout).is_err()
+                    || stream.write_all(b"\r\n").is_err()
+                {
+                    return; // client gone — the loop (and grim spawning) stops
+                }
+            }
+            _ => std::thread::sleep(Duration::from_millis(400)),
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+}
+
 fn handle_http(mut stream: TcpStream, request_head: &str, pin: &str) {
+    if request_head.starts_with("GET /stream") {
+        handle_stream(stream, request_head, pin);
+        return;
+    }
     // /shot: the focused window's screenshot, PIN-gated via the X-Pin header
     // (the page fetch()es it — an <img src> couldn't carry a header).
     if request_head.starts_with("GET /shot") {
