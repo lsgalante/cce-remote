@@ -150,6 +150,18 @@ let dragging = false, dragTimer = null, pendDx = 0, pendDy = 0, pendSy = 0, flus
 // the WS (the stream follows focus server-side).
 let viewMode = false, winRect = null, rectTimer = null, cursorTimer = null;
 const screenEl = document.getElementById("screen");
+// MJPEG in an <img> shows blank when its HTTP connection ends, and a browser
+// never re-requests an unchanged src — so reconnect on error, and via a
+// watchdog for silent stalls (a nonce forces a fresh request each time).
+let streamGen = 0, lastFrameAt = 0, watchdog = null;
+function streamStart() {
+  const pin = localStorage.getItem("cce-remote-pin") || "";
+  streamGen++;
+  lastFrameAt = Date.now();
+  screenEl.src = "/stream?pin=" + encodeURIComponent(pin) + "&g=" + streamGen;
+}
+screenEl.addEventListener("load", () => { lastFrameAt = Date.now(); });
+screenEl.addEventListener("error", () => { if (viewMode) setTimeout(streamStart, 600); });
 function updateRect(wins) {
   const f = wins.find(w => w.focused && w.mode !== "Status");
   if (f) winRect = { id: f.id, x: f.x, y: f.y, w: f.w, h: f.h };
@@ -314,14 +326,19 @@ function setViewMode(on) {
   pad.classList.toggle("view", viewMode);
   resetViewTransform();
   if (viewMode) {
-    const pin = localStorage.getItem("cce-remote-pin") || "";
-    screenEl.src = "/stream?pin=" + encodeURIComponent(pin);
+    streamStart();
     send("wl"); // prime winRect
     rectTimer = setInterval(() => send("wl"), 2000);
     cursorTimer = setInterval(() => send("pl"), 250);
+    // Reconnect if no frame has loaded for a while (the compositor keepalives
+    // every ≤15s, so ~20s of silence means the connection is dead, not idle).
+    watchdog = setInterval(() => {
+      if (viewMode && Date.now() - lastFrameAt > 20000) streamStart();
+    }, 5000);
   } else {
     clearInterval(rectTimer);
     clearInterval(cursorTimer);
+    clearInterval(watchdog);
     vcursor.classList.remove("on");
     screenEl.src = "data:,"; // closes the stream connection
   }
