@@ -145,6 +145,55 @@ fn window_list_json() -> String {
     format!("windows [{}]", objs.join(","))
 }
 
+/// Pull a numeric field out of one windows-json line (no serde — the values
+/// are flat numbers on a single line per window).
+fn json_num(line: &str, key: &str) -> Option<f64> {
+    let pat = format!("\"{key}\":");
+    let rest = &line[line.find(&pat)? + pat.len()..];
+    let end = rest
+        .find(|c: char| !(c.is_ascii_digit() || c == '-' || c == '.'))
+        .unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+/// The focused app window as (id, x, y, w, h) in layout px.
+fn focused_window() -> Option<(u64, f64, f64, f64, f64)> {
+    let reply = control_command("windows --json").ok()?;
+    for line in reply.lines() {
+        if line.contains("\"focused\":true") && !line.contains("\"mode\":\"Status\"") {
+            return Some((
+                json_num(line, "id")? as u64,
+                json_num(line, "x")?,
+                json_num(line, "y")?,
+                json_num(line, "w")?,
+                json_num(line, "h")?,
+            ));
+        }
+    }
+    None
+}
+
+/// Screenshot the focused window via the compositor (it replies with the PNG
+/// path), read the bytes, and DELETE the file — the remote view must not
+/// litter ~/Pictures/screenshots.
+fn take_screenshot() -> Option<(Vec<u8>, (u64, f64, f64, f64, f64))> {
+    let win = focused_window()?;
+    let reply = control_command(&format!("screenshot window {}", win.0)).ok()?;
+    let path = reply.trim().strip_prefix("ok ")?.trim().to_string();
+    let mut bytes = None;
+    for _ in 0..5 {
+        match std::fs::read(&path) {
+            Ok(b) if !b.is_empty() => {
+                bytes = Some(b);
+                break;
+            }
+            _ => std::thread::sleep(Duration::from_millis(60)),
+        }
+    }
+    let _ = std::fs::remove_file(&path);
+    Some((bytes?, win))
+}
+
 fn handle_ws(stream: TcpStream, pin: &str) {
     let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
     // Unauthenticated clients can hold the socket only briefly.
@@ -179,6 +228,19 @@ fn handle_ws(stream: TcpStream, pin: &str) {
                     if text.trim() == "wl" {
                         // Window-list request: the one message with a reply.
                         let _ = ws.send(tungstenite::Message::Text(window_list_json()));
+                    } else if let Some((coords, btn)) = text
+                        .strip_prefix("tap ")
+                        .map(|r| (r, "left"))
+                        .or_else(|| text.strip_prefix("tapr ").map(|r| (r, "right")))
+                    {
+                        // Window-view tap: absolute move + click.
+                        let mut it = coords.split_ascii_whitespace();
+                        if let (Some(Ok(x)), Some(Ok(y))) =
+                            (it.next().map(str::parse::<f64>), it.next().map(str::parse::<f64>))
+                        {
+                            let _ = control_command(&format!("pointer-move-to {x:.1} {y:.1}"));
+                            let _ = control_command(&format!("pointer-click {btn}"));
+                        }
                     } else if let Some(cmd) = translate(&text) {
                         let _ = control_command(&cmd);
                     }
@@ -190,7 +252,33 @@ fn handle_ws(stream: TcpStream, pin: &str) {
     println!("[cce-remote] client disconnected: {peer}");
 }
 
-fn handle_http(mut stream: TcpStream, request_head: &str) {
+fn handle_http(mut stream: TcpStream, request_head: &str, pin: &str) {
+    // /shot: the focused window's screenshot, PIN-gated via the X-Pin header
+    // (the page fetch()es it — an <img src> couldn't carry a header).
+    if request_head.starts_with("GET /shot") {
+        let pin_ok = request_head.lines().any(|l| {
+            let lower = l.to_ascii_lowercase();
+            lower.starts_with("x-pin:") && l[6..].trim() == pin
+        });
+        if !pin_ok {
+            let _ = write!(stream, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            return;
+        }
+        match take_screenshot() {
+            Some((bytes, (id, x, y, w, h))) => {
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nX-Win: {id} {x} {y} {w} {h}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    bytes.len(),
+                );
+                let _ = stream.write_all(&bytes);
+            }
+            None => {
+                let _ = write!(stream, "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            }
+        }
+        return;
+    }
     let ok = request_head.starts_with("GET / ") || request_head.starts_with("GET /index.html ");
     let (status, body) = if ok {
         ("200 OK", INDEX_HTML)
@@ -248,7 +336,7 @@ fn main() {
                 let mut sink = [0u8; 1024];
                 let mut s = stream;
                 let _ = s.read(&mut sink);
-                handle_http(s, &head);
+                handle_http(s, &head, &pin);
             }
         });
     }

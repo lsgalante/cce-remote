@@ -28,6 +28,10 @@
                    border-radius: 10px; }
   #clicks button:active, #bar button:active { background: #2c5f69; }
   #kb { position: absolute; opacity: 0.02; width: 1px; height: 1px; left: -10px; top: -10px; }
+  #screen { display: none; position: absolute; inset: 0; width: 100%; height: 100%;
+            object-fit: contain; background: #0c0d12; border-radius: 12px; z-index: 2; }
+  #pad.view #screen { display: block; }
+  #pad.view .hint { display: none; }
   #switcher { display: none; position: absolute; inset: 8px; overflow-y: auto;
               background: rgba(20,21,28,0.96); border: 1px solid #2e3140;
               border-radius: 10px; z-index: 5; -webkit-overflow-scrolling: touch; }
@@ -62,10 +66,12 @@
   <button data-k="108">↓</button>
   <button data-k="106">→</button>
   <button id="wbtn">☰</button>
+  <button id="vbtn">🖥</button>
   <button id="kbtn">⌨</button>
 </div>
 <div id="preview"></div>
 <div id="pad"><div class="hint">drag = move · tap = click · 2-finger drag = scroll<br>2-finger tap = right click · hold = drag</div>
+  <img id="screen" draggable="false">
   <div id="switcher"></div>
 </div>
 <div id="clicks">
@@ -115,8 +121,40 @@ function swHide() { document.getElementById("switcher").classList.remove("show")
 const ACCEL = 1.6, SCROLL = 0.8;
 // Touch state: one finger moves, two fingers scroll; short still touches
 // click; a long-press starts a held drag (release on lift).
-let touches = new Map(), moved = 0, startT = 0, maxFingers = 0;
+let touches = new Map(), moved = 0, startT = 0, maxFingers = 0, startX = 0, startY = 0;
 let dragging = false, dragTimer = null, pendDx = 0, pendDy = 0, pendSy = 0, flushT = null;
+
+// ── Window view mode: the pad shows the focused window; taps click it ──
+let viewMode = false, winRect = null, shotTimer = null, shotBusy = false;
+const screenEl = document.getElementById("screen");
+async function refreshShot() {
+  if (!viewMode || shotBusy) return;
+  shotBusy = true;
+  try {
+    const r = await fetch("/shot", { headers: { "X-Pin": localStorage.getItem("cce-remote-pin") || "" }, cache: "no-store" });
+    if (r.ok) {
+      const xw = (r.headers.get("X-Win") || "").split(" ").map(Number);
+      if (xw.length === 5) winRect = { id: xw[0], x: xw[1], y: xw[2], w: xw[3], h: xw[4] };
+      const url = URL.createObjectURL(await r.blob());
+      const old = screenEl.src;
+      screenEl.onload = () => { if (old && old.startsWith("blob:")) URL.revokeObjectURL(old); };
+      screenEl.src = url;
+    }
+  } catch (_) {}
+  shotBusy = false;
+}
+// touch point (viewport px) → layout px inside the focused window,
+// accounting for the contain-fit letterbox. null when off the image.
+function mapToWindow(cx, cy) {
+  if (!winRect || !screenEl.naturalWidth) return null;
+  const box = screenEl.getBoundingClientRect();
+  const scale = Math.min(box.width / screenEl.naturalWidth, box.height / screenEl.naturalHeight);
+  const dw = screenEl.naturalWidth * scale, dh = screenEl.naturalHeight * scale;
+  const ox = box.left + (box.width - dw) / 2, oy = box.top + (box.height - dh) / 2;
+  const u = (cx - ox) / dw, v = (cy - oy) / dh;
+  if (u < 0 || u > 1 || v < 0 || v > 1) return null;
+  return [(winRect.x + u * winRect.w).toFixed(1), (winRect.y + v * winRect.h).toFixed(1)];
+}
 
 function flush() {
   flushT = null;
@@ -135,7 +173,18 @@ pad.addEventListener("touchstart", e => {
   maxFingers = Math.max(maxFingers, touches.size);
   if (touches.size === 1) {
     moved = 0; startT = Date.now();
-    dragTimer = setTimeout(() => { if (moved < 8) { dragging = true; send("b left down"); navigator.vibrate && navigator.vibrate(15); } }, 350);
+    const t0 = e.changedTouches[0];
+    startX = t0.clientX; startY = t0.clientY;
+    dragTimer = setTimeout(() => {
+      if (moved >= 8) return;
+      if (viewMode) {
+        // long-press in view mode = right click at the spot
+        const m = mapToWindow(startX, startY);
+        if (m) { send("tapr " + m[0] + " " + m[1]); setTimeout(refreshShot, 450); navigator.vibrate && navigator.vibrate(15); }
+      } else {
+        dragging = true; send("b left down"); navigator.vibrate && navigator.vibrate(15);
+      }
+    }, 350);
   } else { clearTimeout(dragTimer); }
 }, { passive: false });
 
@@ -145,10 +194,10 @@ pad.addEventListener("touchmove", e => {
   if (touches.size === 1) {
     const t = e.changedTouches[0], p = touches.get(t.identifier);
     if (!p) return;
-    pendDx += t.clientX - p.x; pendDy += t.clientY - p.y;
+    // view mode: one-finger movement is not pointer motion (taps only)
+    if (!viewMode) { pendDx += t.clientX - p.x; pendDy += t.clientY - p.y; queueFlush(); }
     moved += Math.abs(t.clientX - p.x) + Math.abs(t.clientY - p.y);
     touches.set(t.identifier, { x: t.clientX, y: t.clientY });
-    queueFlush();
   } else if (touches.size === 2) {
     // scroll: average finger dy, natural direction (content follows finger)
     let dy = 0, n = 0;
@@ -169,7 +218,17 @@ pad.addEventListener("touchend", e => {
   flush();
   if (dragging) { send("b left up"); dragging = false; }
   else if (moved < 10 && Date.now() - startT < 300) {
-    send(maxFingers >= 2 ? "b right click" : "b left click");
+    if (viewMode) {
+      if (maxFingers < 2) {
+        const t = e.changedTouches[0];
+        const m = mapToWindow(t.clientX, t.clientY);
+        if (m) { send("tap " + m[0] + " " + m[1]); setTimeout(refreshShot, 450); }
+      }
+    } else {
+      send(maxFingers >= 2 ? "b right click" : "b left click");
+    }
+  } else if (viewMode && maxFingers >= 2) {
+    setTimeout(refreshShot, 450); // scrolled the window — show the result
   }
   maxFingers = 0;
 }, { passive: false });
@@ -177,6 +236,17 @@ pad.addEventListener("touchcancel", () => { touches.clear(); clearTimeout(dragTi
 
 document.getElementById("lclick").addEventListener("click", () => send("b left click"));
 document.getElementById("rclick").addEventListener("click", () => send("b right click"));
+
+// ── View-mode toggle ─────────────────────────────────────────────────
+const vbtn = document.getElementById("vbtn");
+vbtn.addEventListener("click", () => {
+  viewMode = !viewMode;
+  vbtn.classList.toggle("on", viewMode);
+  pad.classList.toggle("view", viewMode);
+  swHide();
+  if (viewMode) { refreshShot(); shotTimer = setInterval(refreshShot, 1500); }
+  else { clearInterval(shotTimer); }
+});
 
 // ── Window switcher ──────────────────────────────────────────────────
 const switcher = document.getElementById("switcher");

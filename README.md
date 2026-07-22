@@ -29,6 +29,12 @@ Home Screen for a fullscreen app feel.
 - ⌨ — summon the phone keyboard (typing goes through a US-layout
   char→evdev map; iOS `beforeinput` is used, so autocorrect noise is
   filtered)
+- ☰ — window switcher: tap a window to focus it
+- 🖥 — window view mode: the pad shows the focused window (auto-refreshing
+  screenshot, ~1.5s + after each interaction). Tap to click that spot,
+  long-press to right-click, two-finger drag to scroll. Toggle again for
+  the trackpad. Screenshots are served PIN-gated and deleted immediately —
+  nothing accumulates on disk.
 
 ## Security
 
