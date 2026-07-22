@@ -236,6 +236,19 @@ fn handle_ws(stream: TcpStream, pin: &str) {
                     if text.trim() == "wl" {
                         // Window-list request: the one message with a reply.
                         let _ = ws.send(tungstenite::Message::Text(window_list_json()));
+                    } else if text.trim() == "pl" {
+                        // Pointer location (view mode's cursor marker):
+                        // "x=N y=N" → "ploc N N".
+                        if let Ok(reply) = control_command("pointer-location") {
+                            let coords: String = reply
+                                .split_whitespace()
+                                .filter_map(|kv| kv.strip_prefix("x=").or_else(|| kv.strip_prefix("y=")))
+                                .collect::<Vec<_>>()
+                                .join(" ");
+                            if !coords.is_empty() {
+                                let _ = ws.send(tungstenite::Message::Text(format!("ploc {coords}")));
+                            }
+                        }
                     } else if let Some((coords, btn)) = text
                         .strip_prefix("tap ")
                         .map(|r| (r, "left"))

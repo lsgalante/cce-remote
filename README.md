@@ -33,8 +33,10 @@ Home Screen for a fullscreen app feel.
 - 🖥 — window view mode: a live MJPEG stream of the focused window
   (damage-driven wlr-screencopy: ~11 fps when the window is active, idle
   throttled to output damage; grim remains as a fallback path).
-  Tap to click that spot, long-press to right-click, two-finger drag to
-  scroll. Toggle again for the trackpad. Both `/stream` and the one-shot
+  Tap to click that spot, long-press to right-click; one-finger drag moves
+  the pointer exactly like the trackpad (a cyan ring marks the cursor —
+  compositor frames carry none), and two fingers pinch-zoom / pan the view
+  itself. Toggle again for the trackpad. Both `/stream` and the one-shot
   `/shot` endpoint are PIN-gated; nothing accumulates on disk.
 
 ## Security

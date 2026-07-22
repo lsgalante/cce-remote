@@ -29,7 +29,12 @@
   #clicks button:active, #bar button:active { background: #2c5f69; }
   #kb { position: absolute; opacity: 0.02; width: 1px; height: 1px; left: -10px; top: -10px; }
   #screen { display: none; position: absolute; inset: 0; width: 100%; height: 100%;
-            object-fit: contain; background: #0c0d12; border-radius: 12px; z-index: 2; }
+            object-fit: contain; background: #0c0d12; border-radius: 12px; z-index: 2;
+            transform-origin: 0 0; will-change: transform; }
+  #vcursor { display: none; position: absolute; width: 14px; height: 14px; z-index: 3;
+             pointer-events: none; border: 2px solid #7dffff; border-radius: 50%;
+             box-shadow: 0 0 4px #000; margin: -7px 0 0 -7px; }
+  #pad.view #vcursor.on { display: block; }
   #pad.view #screen { display: block; }
   #pad.view .hint { display: none; }
   #switcher, #menu { display: none; position: absolute; inset: 8px; overflow-y: auto;
@@ -72,6 +77,7 @@
 <div id="preview"></div>
 <div id="pad"><div class="hint">drag = move · tap = click · 2-finger drag = scroll<br>2-finger tap = right click · hold = drag</div>
   <img id="screen" draggable="false">
+  <div id="vcursor"></div>
   <div id="switcher"></div>
   <div id="menu"></div>
 </div>
@@ -101,6 +107,7 @@ function connect() {
   };
   ws.onmessage = e => {
     if (typeof e.data === "string" && e.data.startsWith("windows ")) { renderSwitcher(e.data.slice(8)); }
+    else if (typeof e.data === "string" && e.data.startsWith("ploc ")) { updateCursorMarker(e.data.slice(5)); }
     else if (e.data === "auth ok") { authed = true; status.textContent = "●"; status.style.color = "#5fbf6f"; }
     else if (e.data === "auth fail") {
       localStorage.removeItem("cce-remote-pin");
@@ -136,12 +143,45 @@ let dragging = false, dragTimer = null, pendDx = 0, pendDy = 0, pendSy = 0, flus
 // click it. The <img> renders /stream (multipart/x-mixed-replace)
 // natively; winRect for tap mapping is kept fresh by polling `wl` over
 // the WS (the stream follows focus server-side).
-let viewMode = false, winRect = null, rectTimer = null;
+let viewMode = false, winRect = null, rectTimer = null, cursorTimer = null;
 const screenEl = document.getElementById("screen");
 function updateRect(wins) {
   const f = wins.find(w => w.focused && w.mode !== "Status");
   if (f) winRect = { id: f.id, x: f.x, y: f.y, w: f.w, h: f.h };
 }
+// View zoom/pan (two-finger pinch/drag in view mode): a pure client-side
+// transform of the streamed image. Uniform scale+translate means
+// getBoundingClientRect reflects it, so mapToWindow stays correct zoomed.
+let vZoom = 1, vPanX = 0, vPanY = 0, pinch = null;
+function applyViewTransform() {
+  screenEl.style.transform = "translate(" + vPanX + "px," + vPanY + "px) scale(" + vZoom + ")";
+}
+function resetViewTransform() { vZoom = 1; vPanX = 0; vPanY = 0; pinch = null; applyViewTransform(); }
+function clampPan() {
+  const r = pad.getBoundingClientRect();
+  vPanX = Math.min(Math.max(vPanX, r.width - r.width * vZoom), 0);
+  vPanY = Math.min(Math.max(vPanY, r.height - r.height * vZoom), 0);
+  if (vZoom <= 1.001) { vZoom = 1; vPanX = 0; vPanY = 0; }
+}
+
+// The compositor's frames carry no cursor (they're surface textures), so
+// view mode draws its own marker: poll pointer-location over the WS and
+// place the ring via the inverse of the tap mapping.
+const vcursor = document.getElementById("vcursor");
+function updateCursorMarker(coords) {
+  if (!viewMode || !winRect || !screenEl.naturalWidth) { vcursor.classList.remove("on"); return; }
+  const [lx, ly] = coords.split(" ").map(Number);
+  const u = (lx - winRect.x) / winRect.w, v = (ly - winRect.y) / winRect.h;
+  if (!(u >= 0 && u <= 1 && v >= 0 && v <= 1)) { vcursor.classList.remove("on"); return; }
+  const box = screenEl.getBoundingClientRect();
+  const scale = Math.min(box.width / screenEl.naturalWidth, box.height / screenEl.naturalHeight);
+  const dw = screenEl.naturalWidth * scale, dh = screenEl.naturalHeight * scale;
+  const padBox = pad.getBoundingClientRect();
+  vcursor.style.left = (box.left - padBox.left + (box.width - dw) / 2 + u * dw) + "px";
+  vcursor.style.top = (box.top - padBox.top + (box.height - dh) / 2 + v * dh) + "px";
+  vcursor.classList.add("on");
+}
+
 // touch point (viewport px) → layout px inside the focused window,
 // accounting for the contain-fit letterbox. null when off the image.
 function mapToWindow(cx, cy) {
@@ -171,7 +211,7 @@ pad.addEventListener("touchstart", e => {
   for (const t of e.changedTouches) touches.set(t.identifier, { x: t.clientX, y: t.clientY });
   maxFingers = Math.max(maxFingers, touches.size);
   if (touches.size === 1) {
-    moved = 0; startT = Date.now();
+    moved = 0; startT = Date.now(); pinch = null;
     const t0 = e.changedTouches[0];
     startX = t0.clientX; startY = t0.clientY;
     dragTimer = setTimeout(() => {
@@ -193,18 +233,42 @@ pad.addEventListener("touchmove", e => {
   if (touches.size === 1) {
     const t = e.changedTouches[0], p = touches.get(t.identifier);
     if (!p) return;
-    // view mode: one-finger movement is not pointer motion (taps only)
-    if (!viewMode) { pendDx += t.clientX - p.x; pendDy += t.clientY - p.y; queueFlush(); }
+    // one-finger drag = relative pointer motion, in BOTH modes
+    pendDx += t.clientX - p.x; pendDy += t.clientY - p.y; queueFlush();
     moved += Math.abs(t.clientX - p.x) + Math.abs(t.clientY - p.y);
     touches.set(t.identifier, { x: t.clientX, y: t.clientY });
   } else if (touches.size === 2) {
-    // scroll: average finger dy, natural direction (content follows finger)
     let dy = 0, n = 0;
     for (const t of e.changedTouches) {
       const p = touches.get(t.identifier);
       if (p) { dy += t.clientY - p.y; n++; touches.set(t.identifier, { x: t.clientX, y: t.clientY }); }
     }
-    if (n) { pendSy += (-dy / n) * SCROLL; moved += Math.abs(dy); queueFlush(); }
+    if (n) moved += Math.abs(dy);
+    if (viewMode) {
+      // two fingers in view mode: pinch-zoom + pan of the view
+      const pts = [...touches.values()];
+      if (pts.length === 2) {
+        const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+        const cx = (pts[0].x + pts[1].x) / 2, cy = (pts[0].y + pts[1].y) / 2;
+        if (pinch && pinch.dist > 0) {
+          const nz = Math.min(8, Math.max(1, vZoom * (dist / pinch.dist)));
+          const applied = nz / vZoom;
+          const r = pad.getBoundingClientRect();
+          const px = cx - r.left, py = cy - r.top;
+          // zoom about the pinch centroid, then follow its drag
+          vPanX = px - (px - vPanX) * applied + (cx - pinch.cx);
+          vPanY = py - (py - vPanY) * applied + (cy - pinch.cy);
+          vZoom = nz;
+          clampPan();
+          applyViewTransform();
+        }
+        pinch = { dist, cx, cy };
+      }
+    } else if (n) {
+      // trackpad mode: two-finger drag scrolls (natural direction)
+      pendSy += (-dy / n) * SCROLL;
+      queueFlush();
+    }
   }
 }, { passive: false });
 
@@ -212,6 +276,7 @@ pad.addEventListener("touchend", e => {
   if (swContains(e.target)) return;
   e.preventDefault();
   for (const t of e.changedTouches) touches.delete(t.identifier);
+  if (touches.size < 2) pinch = null;
   if (touches.size > 0) return;
   clearTimeout(dragTimer);
   flush();
@@ -241,13 +306,17 @@ function setViewMode(on) {
   viewMode = on;
   mbtn.classList.toggle("on", viewMode);
   pad.classList.toggle("view", viewMode);
+  resetViewTransform();
   if (viewMode) {
     const pin = localStorage.getItem("cce-remote-pin") || "";
     screenEl.src = "/stream?pin=" + encodeURIComponent(pin);
     send("wl"); // prime winRect
     rectTimer = setInterval(() => send("wl"), 2000);
+    cursorTimer = setInterval(() => send("pl"), 250);
   } else {
     clearInterval(rectTimer);
+    clearInterval(cursorTimer);
+    vcursor.classList.remove("on");
     screenEl.src = "data:,"; // closes the stream connection
   }
 }
