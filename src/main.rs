@@ -26,6 +26,8 @@ use std::net::{TcpListener, TcpStream};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
+mod screencopy;
+
 const INDEX_HTML: &str = include_str!("../index.html");
 const DEFAULT_PORT: u16 = 17017;
 
@@ -277,6 +279,13 @@ fn handle_stream(mut stream: TcpStream, request_head: &str, pin: &str) {
     .is_err()
     {
         return;
+    }
+    // Primary: persistent damage-driven screencopy (idle = zero frames,
+    // active = compositor-paced). Fallback: the original grim loop.
+    let rect = || focused_window().map(|(_, x, y, w, h)| (x as i32, y as i32, w as i32, h as i32));
+    match screencopy::stream_mjpeg(&mut stream, rect) {
+        Ok(()) => return, // client disconnected
+        Err(e) => eprintln!("[cce-remote] screencopy stream failed ({e}), falling back to grim"),
     }
     let mut win = focused_window();
     let mut tick = 0u32;

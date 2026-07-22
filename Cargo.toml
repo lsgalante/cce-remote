@@ -7,3 +7,8 @@ license = "GPL-3.0"
 
 [dependencies]
 tungstenite = "0.21"
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+memmap2 = "0.9"
+jpeg-encoder = "0.6"
+rustix = { version = "0.38", features = ["event"] }
