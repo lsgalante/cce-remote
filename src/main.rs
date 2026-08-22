@@ -105,10 +105,13 @@ fn finite(v: f64) -> Option<f64> {
     v.is_finite().then_some(v)
 }
 
-/// Translate one WS frame into a control-socket command. Returns None for
-/// frames that don't parse — they're dropped, never forwarded raw (the WS
-/// payload is untrusted; only these fixed shapes reach the compositor).
-fn translate(frame: &str) -> Option<String> {
+/// Translate one WS frame into the control-socket commands it means. Returns
+/// None for frames that don't parse — they're dropped, never forwarded raw
+/// (the WS payload is untrusted; only these fixed shapes reach the
+/// compositor). A list rather than one command because a window-view tap is
+/// one frame and two commands; keeping that here rather than inline at the
+/// call site is what makes this the single place input is validated.
+fn translate(frame: &str) -> Option<Vec<String>> {
     let mut it = frame.split_ascii_whitespace();
     let cmd = match it.next()? {
         "m" => {
@@ -143,6 +146,17 @@ fn translate(frame: &str) -> Option<String> {
             }
             format!("focus-window {target}")
         }
+        // Window-view tap: absolute move, then click. The one frame that means
+        // two commands — hence the Vec return.
+        verb @ ("tap" | "tapr") => {
+            let btn = if verb == "tapr" { "right" } else { "left" };
+            let x = finite(it.next()?.parse().ok()?)?;
+            let y = finite(it.next()?.parse().ok()?)?;
+            return Some(vec![
+                format!("pointer-move-to {x:.1} {y:.1}"),
+                format!("pointer-click {btn}"),
+            ]);
+        }
         // Named commands, individually whitelisted — never pass-through.
         "cmd" => match it.next()? {
             "restart-compositor" => "restart-compositor".to_string(),
@@ -150,7 +164,7 @@ fn translate(frame: &str) -> Option<String> {
         },
         _ => return None,
     };
-    Some(cmd)
+    Some(vec![cmd])
 }
 
 /// The `windows --json` reply (one JSON object per line) as a JSON array
@@ -257,21 +271,13 @@ fn handle_ws(stream: TcpStream, pin: &str) {
                                 let _ = ws.send(tungstenite::Message::Text(format!("ploc {coords}")));
                             }
                         }
-                    } else if let Some((coords, btn)) = text
-                        .strip_prefix("tap ")
-                        .map(|r| (r, "left"))
-                        .or_else(|| text.strip_prefix("tapr ").map(|r| (r, "right")))
-                    {
-                        // Window-view tap: absolute move + click.
-                        let mut it = coords.split_ascii_whitespace();
-                        if let (Some(Ok(x)), Some(Ok(y))) =
-                            (it.next().map(str::parse::<f64>), it.next().map(str::parse::<f64>))
-                        {
-                            let _ = control_command(&format!("pointer-move-to {x:.1} {y:.1}"));
-                            let _ = control_command(&format!("pointer-click {btn}"));
+                    } else if let Some(cmds) = translate(&text) {
+                        // Every input-bearing frame goes through translate() —
+                        // `wl` and `pl` above are the only exceptions, and they
+                        // send fixed commands with no caller-supplied content.
+                        for cmd in cmds {
+                            let _ = control_command(&cmd);
                         }
-                    } else if let Some(cmd) = translate(&text) {
-                        let _ = control_command(&cmd);
                     }
                 }
             }
@@ -462,32 +468,39 @@ mod tests {
     // everything it must refuse — because a regression here is not a wrong
     // pixel, it is remote input injection.
 
+    /// A frame expected to mean exactly one command.
+    fn one(frame: &str) -> String {
+        let cmds = translate(frame).expect("frame should translate");
+        assert_eq!(cmds.len(), 1, "{frame:?} yielded {cmds:?}, expected one command");
+        cmds.into_iter().next().unwrap()
+    }
+
     #[test]
     fn pointer_and_scroll_carry_fixed_precision() {
-        assert_eq!(translate("m 1 -2").unwrap(), "pointer-move-by 1.00 -2.00");
-        assert_eq!(translate("m 0.126 -0.126").unwrap(), "pointer-move-by 0.13 -0.13");
+        assert_eq!(one("m 1 -2"), "pointer-move-by 1.00 -2.00");
+        assert_eq!(one("m 0.126 -0.126"), "pointer-move-by 0.13 -0.13");
         // Exact .5 ties round half-to-even, not away from zero — sub-pixel
         // detail the page never notices, but pin it so a formatting change
         // shows up here rather than as drifting pointer feel.
-        assert_eq!(translate("m 0.125 0.135").unwrap(), "pointer-move-by 0.12 0.14");
+        assert_eq!(one("m 0.125 0.135"), "pointer-move-by 0.12 0.14");
         // `s` takes dy first; dx is optional and defaults to 0.
-        assert_eq!(translate("s 5").unwrap(), "pointer-scroll 5.000 0.000");
-        assert_eq!(translate("s 5 -1.5").unwrap(), "pointer-scroll 5.000 -1.500");
+        assert_eq!(one("s 5"), "pointer-scroll 5.000 0.000");
+        assert_eq!(one("s 5 -1.5"), "pointer-scroll 5.000 -1.500");
     }
 
     #[test]
     fn buttons_map_to_press_release_click() {
-        assert_eq!(translate("b left down").unwrap(), "pointer-press left");
-        assert_eq!(translate("b left up").unwrap(), "pointer-release left");
-        assert_eq!(translate("b right click").unwrap(), "pointer-click right");
-        assert_eq!(translate("b middle click").unwrap(), "pointer-click middle");
+        assert_eq!(one("b left down"), "pointer-press left");
+        assert_eq!(one("b left up"), "pointer-release left");
+        assert_eq!(one("b right click"), "pointer-click right");
+        assert_eq!(one("b middle click"), "pointer-click middle");
     }
 
     #[test]
     fn keys_map_to_tap_and_hold() {
-        assert_eq!(translate("k 28").unwrap(), "keypress 28");
-        assert_eq!(translate("kd 42").unwrap(), "key-down 42");
-        assert_eq!(translate("ku 42").unwrap(), "key-up 42");
+        assert_eq!(one("k 28"), "keypress 28");
+        assert_eq!(one("kd 42"), "key-down 42");
+        assert_eq!(one("ku 42"), "key-up 42");
     }
 
     #[test]
@@ -511,6 +524,7 @@ mod tests {
             "kd", "ku",
             "b", "b left", "b left bogus", "b sideways click", "b LEFT click",
             "wf", "cmd",
+            "tap", "tapr", "tap 1", "tapr 1", "tap a b", "tap 1 b",
         ] {
             assert!(translate(frame).is_none(), "{frame:?} should be dropped");
         }
@@ -528,6 +542,7 @@ mod tests {
         for frame in [
             "m NaN 1", "m 1 NaN", "m inf 0", "m -inf 0", "m 1 infinity",
             "s NaN", "s 1 inf", "s nan 0",
+            "tap NaN 1", "tap 1 inf", "tapr -inf 0", "tapr 1 nan",
         ] {
             assert!(translate(frame).is_none(), "{frame:?} should be dropped");
         }
@@ -535,9 +550,9 @@ mod tests {
 
     #[test]
     fn focus_target_is_restricted_to_safe_tokens() {
-        assert_eq!(translate("wf 12").unwrap(), "focus-window 12");
-        assert_eq!(translate("wf org.cce.files").unwrap(), "focus-window org.cce.files");
-        assert_eq!(translate("wf a-b_c:d.1").unwrap(), "focus-window a-b_c:d.1");
+        assert_eq!(one("wf 12"), "focus-window 12");
+        assert_eq!(one("wf org.cce.files"), "focus-window org.cce.files");
+        assert_eq!(one("wf a-b_c:d.1"), "focus-window a-b_c:d.1");
         for frame in [
             "wf ../etc", "wf a/b", "wf a;b", "wf a$b", "wf a*b",
             "wf a'b", "wf a\"b", "wf a|b", "wf a&b", "wf a\\b",
@@ -551,12 +566,41 @@ mod tests {
 
     #[test]
     fn named_commands_are_whitelisted_never_passed_through() {
-        assert_eq!(translate("cmd restart-compositor").unwrap(), "restart-compositor");
+        assert_eq!(one("cmd restart-compositor"), "restart-compositor");
         // Trailing junk is discarded, not appended.
-        assert_eq!(translate("cmd restart-compositor rm -rf").unwrap(), "restart-compositor");
+        assert_eq!(one("cmd restart-compositor rm -rf"), "restart-compositor");
         for frame in ["cmd exit", "cmd reload", "cmd spawn foot", "cmd RESTART-COMPOSITOR"] {
             assert!(translate(frame).is_none(), "{frame:?} should be dropped");
         }
+    }
+
+    #[test]
+    fn a_tap_is_one_frame_and_two_commands() {
+        // The window-view tap: move the pointer somewhere absolute, then click
+        // it. Both commands, in that order — a click without the move lands
+        // wherever the pointer happened to be.
+        assert_eq!(
+            translate("tap 100 200.5").unwrap(),
+            ["pointer-move-to 100.0 200.5", "pointer-click left"]
+        );
+        assert_eq!(
+            translate("tapr 0 0").unwrap(),
+            ["pointer-move-to 0.0 0.0", "pointer-click right"]
+        );
+        // Negative coords are legal: the layout origin is not the only anchor.
+        assert_eq!(
+            translate("tap -5.25 -0.04").unwrap(),
+            ["pointer-move-to -5.2 -0.0", "pointer-click left"]
+        );
+        // Trailing junk is discarded, exactly as for the one-command verbs.
+        assert_eq!(
+            translate("tap 1 2 pointer-press left").unwrap(),
+            ["pointer-move-to 1.0 2.0", "pointer-click left"]
+        );
+        // A partial tap must emit NOTHING — not a bare move, and above all not
+        // a click at whatever position the pointer already had.
+        assert!(translate("tap 1").is_none());
+        assert!(translate("tap").is_none());
     }
 
     #[test]
@@ -565,8 +609,8 @@ mod tests {
         // would be a second command on the socket. split_ascii_whitespace()
         // eats it and every command is REBUILT from re-parsed values, so
         // trailing tokens are discarded rather than forwarded.
-        assert_eq!(translate("m 1 2\npointer-click left").unwrap(), "pointer-move-by 1.00 2.00");
-        assert_eq!(translate("wf 12\nexit").unwrap(), "focus-window 12");
+        assert_eq!(one("m 1 2\npointer-click left"), "pointer-move-by 1.00 2.00");
+        assert_eq!(one("wf 12\nexit"), "focus-window 12");
 
         // The property that matters, over every shape the page can send plus
         // deliberate junk: whatever comes out is a single line.
@@ -575,7 +619,7 @@ mod tests {
             "k 28\nexit", "kd 42\nexit", "ku 42\nexit", "wf 1\nexit",
             "cmd restart-compositor\nexit", "m\t1\t2", "wf\n12", "  m   1   2  ",
         ] {
-            if let Some(out) = translate(frame) {
+            for out in translate(frame).unwrap_or_default() {
                 assert!(!out.contains('\n'), "{frame:?} produced a multi-line command: {out:?}");
                 assert!(!out.contains('\r'), "{frame:?} produced a CR: {out:?}");
             }
