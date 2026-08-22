@@ -147,6 +147,91 @@ fn query_pin_ok(request_head: &str, pin: &str) -> bool {
         })
 }
 
+/// Failed PIN attempts allowed back-to-back from one peer before it must wait.
+/// Sized for a human mistyping a PIN, not for a client retry loop.
+const PIN_ATTEMPT_BURST: f64 = 5.0;
+/// Sustained rate a peer recovers attempts at: one per 30s. That caps a
+/// brute-force at ~2/min, so walking a 6-digit space takes on the order of a
+/// year rather than the couple of hours an unthrottled LAN socket allows.
+const PIN_ATTEMPT_REFILL_PER_SEC: f64 = 1.0 / 30.0;
+/// Backstop on the tracking table so the limiter cannot itself be turned into
+/// a memory-exhaustion vector by cycling source addresses.
+const PIN_MAX_TRACKED_PEERS: usize = 4096;
+
+#[derive(Clone, Copy, Debug)]
+struct Bucket {
+    tokens: f64,
+    last: std::time::Instant,
+}
+
+/// Per-peer token bucket over failed PIN attempts.
+///
+/// The PIN is ~20 bits and every gate compares it with `==`, so the thing that
+/// actually makes it a credential is that an attacker cannot try often. Only
+/// FAILURES consume tokens — a paired client reconnecting its stream, which
+/// the page does on every hiccup, must never be throttled — and a success
+/// clears the peer's record entirely.
+///
+/// `now` is a parameter rather than read inside, so the behavior is testable
+/// without sleeping.
+struct RateLimiter {
+    peers: std::sync::Mutex<std::collections::HashMap<std::net::IpAddr, Bucket>>,
+}
+
+impl RateLimiter {
+    fn new() -> Self {
+        Self { peers: std::sync::Mutex::new(std::collections::HashMap::new()) }
+    }
+
+    fn refilled(bucket: Bucket, now: std::time::Instant) -> Bucket {
+        let elapsed = now.saturating_duration_since(bucket.last).as_secs_f64();
+        Bucket {
+            tokens: (bucket.tokens + elapsed * PIN_ATTEMPT_REFILL_PER_SEC).min(PIN_ATTEMPT_BURST),
+            last: now,
+        }
+    }
+
+    /// May this peer attempt a PIN right now? Does not consume anything —
+    /// a correct PIN costs nothing.
+    fn allow(&self, ip: std::net::IpAddr, now: std::time::Instant) -> bool {
+        let peers = self.peers.lock().unwrap();
+        match peers.get(&ip) {
+            Some(&b) => Self::refilled(b, now).tokens >= 1.0,
+            None => true,
+        }
+    }
+
+    /// Charge this peer for a wrong PIN.
+    fn record_failure(&self, ip: std::net::IpAddr, now: std::time::Instant) {
+        let mut peers = self.peers.lock().unwrap();
+        // A fully refilled bucket is indistinguishable from an absent one, so
+        // dropping those keeps the table proportional to peers currently being
+        // penalized rather than to every peer ever seen.
+        peers.retain(|_, b| Self::refilled(*b, now).tokens < PIN_ATTEMPT_BURST);
+        if peers.len() >= PIN_MAX_TRACKED_PEERS && !peers.contains_key(&ip) {
+            // At capacity: evict whoever is closest to having recovered.
+            if let Some(&victim) = peers
+                .iter()
+                .max_by(|a, b| a.1.tokens.total_cmp(&b.1.tokens))
+                .map(|(k, _)| k)
+            {
+                peers.remove(&victim);
+            }
+        }
+        let entry = peers
+            .entry(ip)
+            .or_insert(Bucket { tokens: PIN_ATTEMPT_BURST, last: now });
+        let mut b = Self::refilled(*entry, now);
+        b.tokens = (b.tokens - 1.0).max(0.0);
+        *entry = b;
+    }
+
+    /// A correct PIN clears the peer's record.
+    fn record_success(&self, ip: std::net::IpAddr) {
+        self.peers.lock().unwrap().remove(&ip);
+    }
+}
+
 /// `f64::from_str` accepts "NaN" / "inf" / "infinity", and `{:.2}` formats them
 /// straight back out, so without this a frame of `m NaN NaN` would reach the
 /// compositor's pointer math verbatim. Reject rather than clamp: no legitimate
@@ -274,7 +359,7 @@ fn take_screenshot() -> Option<(Vec<u8>, (u64, f64, f64, f64, f64))> {
     Some((bytes?, win))
 }
 
-fn handle_ws(stream: TcpStream, pin: &str) {
+fn handle_ws(stream: TcpStream, pin: &str, ip: std::net::IpAddr, limiter: &RateLimiter) {
     let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
     // Unauthenticated clients can hold the socket only briefly.
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
@@ -287,16 +372,27 @@ fn handle_ws(stream: TcpStream, pin: &str) {
     };
     // First frame MUST be `auth <pin>` — anything else (or a timeout, or a
     // wrong PIN) closes the connection before any input can be injected.
+    if !limiter.allow(ip, std::time::Instant::now()) {
+        // Close WITHOUT "auth fail": that message makes the page drop its
+        // stored PIN and prompt, so sending it here would punish a correctly
+        // paired client for someone else's guessing on the same address. It
+        // reconnects on close and succeeds once the bucket refills.
+        eprintln!("[cce-remote] auth rate-limited: {peer}");
+        let _ = ws.close(None);
+        return;
+    }
     let authed = matches!(
         ws.read(),
         Ok(tungstenite::Message::Text(t)) if auth_frame_ok(&t, pin)
     );
     if !authed {
+        limiter.record_failure(ip, std::time::Instant::now());
         eprintln!("[cce-remote] auth failed: {peer}");
         let _ = ws.send(tungstenite::Message::Text("auth fail".into()));
         let _ = ws.close(None);
         return;
     }
+    limiter.record_success(ip);
     let _ = ws.get_ref().set_read_timeout(None);
     let _ = ws.send(tungstenite::Message::Text("auth ok".into()));
     println!("[cce-remote] client connected: {peer}");
@@ -342,14 +438,20 @@ fn handle_ws(stream: TcpStream, pin: &str) {
 /// full-size window — the screencopy dominates, not the encode. Runs until
 /// the client closes the socket. PIN via X-Pin header or ?pin= query (an
 /// <img src> can't carry headers).
-fn handle_stream(mut stream: TcpStream, request_head: &str, pin: &str) {
+fn handle_stream(mut stream: TcpStream, request_head: &str, pin: &str, ip: std::net::IpAddr, limiter: &RateLimiter) {
+    if !limiter.allow(ip, std::time::Instant::now()) {
+        let _ = write!(stream, "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 30\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        return;
+    }
     // Header OR query: an <img src> cannot carry a header, so /stream accepts
     // the PIN in the URL. /shot does not — see handle_http.
     let pin_ok = header_pin_ok(request_head, pin) || query_pin_ok(request_head, pin);
     if !pin_ok {
+        limiter.record_failure(ip, std::time::Instant::now());
         let _ = write!(stream, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         return;
     }
+    limiter.record_success(ip);
     if write!(
         stream,
         "HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=frame\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
@@ -408,20 +510,26 @@ fn handle_stream(mut stream: TcpStream, request_head: &str, pin: &str) {
     }
 }
 
-fn handle_http(mut stream: TcpStream, request_head: &str, pin: &str) {
+fn handle_http(mut stream: TcpStream, request_head: &str, pin: &str, ip: std::net::IpAddr, limiter: &RateLimiter) {
     if request_head.starts_with("GET /stream") {
-        handle_stream(stream, request_head, pin);
+        handle_stream(stream, request_head, pin, ip, limiter);
         return;
     }
     // /shot: the focused window's screenshot, PIN-gated via the X-Pin header
     // (the page fetch()es it — an <img src> couldn't carry a header).
     if request_head.starts_with("GET /shot") {
+        if !limiter.allow(ip, std::time::Instant::now()) {
+            let _ = write!(stream, "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 30\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            return;
+        }
         // Header only: the page fetch()es this one, so unlike /stream there is
         // no reason to let the PIN travel in a URL (where it lands in logs).
         if !header_pin_ok(request_head, pin) {
+            limiter.record_failure(ip, std::time::Instant::now());
             let _ = write!(stream, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
             return;
         }
+        limiter.record_success(ip);
         match take_screenshot() {
             Some((bytes, (id, x, y, w, h))) => {
                 let _ = write!(
@@ -469,6 +577,7 @@ fn main() {
             std::process::exit(1);
         }
     };
+    let limiter = std::sync::Arc::new(RateLimiter::new());
     println!("[cce-remote] serving on http://0.0.0.0:{port} (control socket: {})", control_socket_path());
     println!("[cce-remote] pairing PIN: {pin}   (stored in {:?})", pin_path());
 
@@ -477,7 +586,13 @@ fn main() {
             Ok(s) => s,
             Err(_) => continue,
         };
+        // Identify the peer once, here: every PIN gate is rate-limited per
+        // source address, and a socket whose peer cannot be resolved cannot be
+        // held accountable for its guesses, so it is refused rather than
+        // exempted.
+        let Ok(ip) = stream.peer_addr().map(|a| a.ip()) else { continue };
         let pin = pin.clone();
+        let limiter = std::sync::Arc::clone(&limiter);
         std::thread::spawn(move || {
             // Peek the request head without consuming it, so a WS upgrade can
             // be handed to tungstenite with the handshake bytes intact.
@@ -488,13 +603,13 @@ fn main() {
             };
             let head = String::from_utf8_lossy(&buf[..n]).to_string();
             if head.starts_with("GET /ws") {
-                handle_ws(stream, &pin);
+                handle_ws(stream, &pin, ip, &limiter);
             } else {
                 // Consume the request before replying (keeps curl happy).
                 let mut sink = [0u8; 1024];
                 let mut s = stream;
                 let _ = s.read(&mut sink);
-                handle_http(s, &head, &pin);
+                handle_http(s, &head, &pin, ip, &limiter);
             }
         });
     }
@@ -516,6 +631,122 @@ mod tests {
         let cmds = translate(frame).expect("frame should translate");
         assert_eq!(cmds.len(), 1, "{frame:?} yielded {cmds:?}, expected one command");
         cmds.into_iter().next().unwrap()
+    }
+
+    // ---- rate limiting ----
+    //
+    // What actually makes a 6-digit PIN a credential: not the comparison, but
+    // that a peer cannot try often. Time is injected, so none of this sleeps.
+
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::time::Instant;
+
+    fn ip(last: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(192, 168, 1, last))
+    }
+
+    #[test]
+    fn a_peer_gets_a_burst_then_must_wait() {
+        let rl = RateLimiter::new();
+        let t0 = Instant::now();
+        let peer = ip(10);
+
+        for i in 0..PIN_ATTEMPT_BURST as u32 {
+            assert!(rl.allow(peer, t0), "attempt {i} should be allowed");
+            rl.record_failure(peer, t0);
+        }
+        assert!(!rl.allow(peer, t0), "the burst must be exhausted");
+
+        // Still locked out just short of the refill interval, allowed after it.
+        assert!(!rl.allow(peer, t0 + Duration::from_secs(29)));
+        assert!(rl.allow(peer, t0 + Duration::from_secs(31)));
+    }
+
+    #[test]
+    fn recovery_is_capped_at_the_burst_size() {
+        // Asserted on refilled() directly rather than through the public API:
+        // record_failure() prunes recovered peers and re-creates them at full,
+        // which masks a missing cap end-to-end. (It did — this test passed
+        // against a build with the .min() removed until it was written this
+        // way.) Idle time must not bank attempts.
+        let t0 = Instant::now();
+        let drained = Bucket { tokens: 0.0, last: t0 };
+        // Full recovery takes BURST * 30s = 150s; well past that, nothing accrues.
+        for idle in [300u64, 3600, 86_400] {
+            let b = RateLimiter::refilled(drained, t0 + Duration::from_secs(idle));
+            assert_eq!(
+                b.tokens, PIN_ATTEMPT_BURST,
+                "{idle}s idle banked {} attempts", b.tokens
+            );
+        }
+        // Partial recovery is proportional, not all-or-nothing.
+        let b = RateLimiter::refilled(drained, t0 + Duration::from_secs(60));
+        assert!(b.tokens > 1.0);
+        let b = RateLimiter::refilled(drained, t0 + Duration::from_secs(15));
+        assert!(b.tokens < 1.0, "half an interval must not buy a whole attempt");
+    }
+
+    #[test]
+    fn peers_are_limited_independently() {
+        let rl = RateLimiter::new();
+        let t0 = Instant::now();
+        let (attacker, phone) = (ip(20), ip(21));
+        for _ in 0..PIN_ATTEMPT_BURST as u32 {
+            rl.record_failure(attacker, t0);
+        }
+        assert!(!rl.allow(attacker, t0));
+        assert!(rl.allow(phone, t0), "one peer's guessing must not lock out another");
+    }
+
+    #[test]
+    fn a_correct_pin_costs_nothing_and_clears_the_record() {
+        let rl = RateLimiter::new();
+        let t0 = Instant::now();
+        let peer = ip(30);
+
+        // The page reconnects its stream on every hiccup, each time presenting
+        // a correct PIN. If that consumed budget it would throttle itself.
+        for _ in 0..1000 {
+            assert!(rl.allow(peer, t0));
+        }
+
+        for _ in 0..(PIN_ATTEMPT_BURST as u32 - 1) {
+            rl.record_failure(peer, t0);
+        }
+        rl.record_success(peer);
+        for _ in 0..PIN_ATTEMPT_BURST as u32 {
+            assert!(rl.allow(peer, t0), "success should restore the full burst");
+            rl.record_failure(peer, t0);
+        }
+    }
+
+    #[test]
+    fn the_tracking_table_does_not_grow_without_bound() {
+        let rl = RateLimiter::new();
+        let t0 = Instant::now();
+
+        // Recovered peers carry no information and must not be retained.
+        for i in 0..200u8 {
+            rl.record_failure(ip(i), t0);
+        }
+        assert!(rl.peers.lock().unwrap().len() > 1);
+        rl.record_failure(ip(255), t0 + Duration::from_secs(3600));
+        assert_eq!(
+            rl.peers.lock().unwrap().len(),
+            1,
+            "fully refilled peers should have been pruned"
+        );
+
+        // And the table is capped even when every entry is still penalized.
+        let mut rl2 = RateLimiter::new();
+        // One failure per peer is enough to create (and hold) an entry.
+        for i in 0..(PIN_MAX_TRACKED_PEERS + 50) {
+            rl2.record_failure(IpAddr::V4(Ipv4Addr::from((i as u32).to_be_bytes())), t0);
+        }
+        assert!(
+            rl2.peers.get_mut().unwrap().len() <= PIN_MAX_TRACKED_PEERS,
+            "table exceeded its cap"
+        );
     }
 
     // ---- the pairing PIN ----

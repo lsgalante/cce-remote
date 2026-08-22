@@ -45,5 +45,11 @@ Pairing PIN: a persistent 6-digit PIN is generated on first run (printed at
 startup, stored 0600 in `~/.config/cce/cce-remote.pin`). The page asks for
 it once per device and remembers it (localStorage); the server closes any
 WebSocket whose first frame isn't `auth <pin>`, so no input can be injected
-without pairing. Delete the PIN file to rotate it. Traffic is plain HTTP on
-the LAN — for hostile networks, tunnel it.
+without pairing. Delete the PIN file to rotate it.
+
+Wrong PINs are rate-limited per source address — five in a row, then one more
+every 30 seconds (HTTP replies `429 Too Many Requests`) — so the 6-digit space
+can't be walked. Correct PINs cost nothing and a success clears the peer's
+record, so a phone reconnecting its stream is never throttled.
+
+Traffic is plain HTTP on the LAN — for hostile networks, tunnel it.

@@ -71,13 +71,41 @@ regenerates on an empty file so it should be unreachable, but that is a property
 *different* function, and if it lapsed, a bare `X-Pin:` header would authenticate
 everything. Gate on the dangerous state, don't trust the caller.
 
-Be honest about the resulting model rather than treating the PIN as security: it is
-**~20 bits, compared with `==` (not constant-time), over plain HTTP on 0.0.0.0**, cached
-in `localStorage`, and for `/stream` it travels in a URL — where it lands in any proxy
-or browser history that sees it. Nothing rate-limits attempts. It is pairing, i.e. it
-stops the other devices on a trusted LAN from steering the desktop by accident. It is
-not a defense against someone who is on that network on purpose. For a hostile network
-the answer is a tunnel, not a longer PIN.
+### The rate limiter is what makes 20 bits a credential
+
+A 6-digit PIN is ~20 bits compared with `==`. What keeps that from being walked in an
+afternoon is not the comparison, it is `RateLimiter`: a **per-source-IP token bucket
+over failed attempts**, 5 back-to-back then one recovered per 30s. That caps sustained
+guessing at ~2/min, which turns a couple of hours into the order of a year. All three
+gates consult it, and an unresolvable peer address is refused rather than exempted.
+
+Three properties it must keep, each with a test:
+
+- **Only failures are charged, and a success clears the record.** The page reconnects
+  its stream on every hiccup — an `error` event, the 20s watchdog — each time presenting
+  a correct PIN. If those consumed budget, a working client would throttle itself off.
+- **Refill caps at the burst.** Otherwise an idle attacker banks attempts and the limit
+  is only an average. Note the test asserts this on `refilled()` *directly*: going
+  through the public API hides a missing cap, because `record_failure` prunes recovered
+  peers and re-creates them at full.
+- **The table cannot grow without bound**, or the limiter becomes its own
+  memory-exhaustion vector. Recovered peers are pruned on write (a full bucket is
+  indistinguishable from an absent one) with a hard cap behind that, evicting whoever is
+  closest to recovered.
+
+On the WS side, a rate-limited connection is closed **without** sending `auth fail` —
+that message makes the page discard its stored PIN and prompt, so sending it would
+punish a correctly-paired client for someone else's guessing from the same address. The
+page reconnects on close and succeeds once the bucket refills. HTTP answers `429` with
+`Retry-After`.
+
+Be honest about what is left rather than treating the PIN as security: it still travels
+over **plain HTTP on 0.0.0.0**, is compared non-constant-time, is cached in
+`localStorage`, and for `/stream` it rides in a URL, where it lands in any proxy or
+history that sees it. Limiting is per-IP, so a peer with many addresses gets many
+budgets. It is pairing — it stops other devices on a trusted LAN from steering the
+desktop by accident, and now also stops casual brute force. It is not a defense against
+someone who is on that network on purpose. For a hostile network the answer is a tunnel.
 
 ## Framing: the control socket is one-shot
 
