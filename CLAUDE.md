@@ -64,13 +64,20 @@ differently, because of a browser constraint: `/shot` takes an `X-Pin` header (t
 `fetch()`es it), but `/stream` accepts `?pin=` in the query string, because an
 `<img src>` cannot carry headers.
 
+All three gates are pure functions — `auth_frame_ok`, `header_pin_ok`, `query_pin_ok`,
+all over `pin_matches` — so they are unit-tested rather than only reachable through a
+socket. `pin_matches` refuses an **empty** PIN outright: `load_or_create_pin`
+regenerates on an empty file so it should be unreachable, but that is a property of a
+*different* function, and if it lapsed, a bare `X-Pin:` header would authenticate
+everything. Gate on the dangerous state, don't trust the caller.
+
 Be honest about the resulting model rather than treating the PIN as security: it is
 **~20 bits, compared with `==` (not constant-time), over plain HTTP on 0.0.0.0**, cached
 in `localStorage`, and for `/stream` it travels in a URL — where it lands in any proxy
-or browser history that sees it. It is pairing, i.e. it stops the other devices on a
-trusted LAN from steering the desktop by accident. It is not a defense against someone
-who is on that network on purpose. For a hostile network the answer is a tunnel, not a
-longer PIN.
+or browser history that sees it. Nothing rate-limits attempts. It is pairing, i.e. it
+stops the other devices on a trusted LAN from steering the desktop by accident. It is
+not a defense against someone who is on that network on purpose. For a hostile network
+the answer is a tunnel, not a longer PIN.
 
 ## Framing: the control socket is one-shot
 
@@ -158,9 +165,11 @@ The awkward part: **there is no WebSocket client on this machine** (no `websocat
 `wscat`, no python `websockets`), so the WS path — which is most of the logic — can only
 be driven from a real phone, or by writing a throwaway client.
 
-`translate()` is the exception, and it is where the crate's one invariant is actually
-enforced, so it carries the crate's only tests (`cargo test -p cce-remote`, 10 of them,
-in `main.rs`). They cover the accepted shapes and — more to the point — everything that
+The pure functions are the exception, and they are where the crate's invariants are
+actually enforced, so they carry all the tests (`cargo test -p cce-remote`, 15 of them,
+in `main.rs`) — `translate()` for what a paired client may say, and the three PIN gates
+for who is paired at all. They cover the accepted shapes and — more to the point —
+everything that
 must be refused: unknown verbs *including the compositor's own command names*,
 malformed and missing arguments, `wf` targets outside `safe_token`, unwhitelisted `cmd`
 names, and the property that no input can make the output span two lines (an embedded

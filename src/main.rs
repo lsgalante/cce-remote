@@ -97,6 +97,56 @@ fn safe_token(t: &str) -> bool {
         && t.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':'))
 }
 
+/// Whether `candidate` is the pairing PIN.
+///
+/// An empty PIN never authorizes anything. `load_or_create_pin` cannot produce
+/// one — it regenerates on an empty file — but that is a property of a
+/// different function, and if it ever stopped holding, a bare `X-Pin:` header
+/// or an `auth ` frame with nothing after it would authenticate every request.
+/// Gate on the dangerous state here rather than trusting the caller.
+fn pin_matches(candidate: &str, pin: &str) -> bool {
+    !pin.is_empty() && candidate == pin
+}
+
+/// The WebSocket auth gate: the FIRST frame must be `auth <pin>`. Everything
+/// else — a wrong PIN, a different verb, an input event sent before pairing —
+/// closes the connection, so no input can be injected unauthenticated.
+fn auth_frame_ok(frame: &str, pin: &str) -> bool {
+    frame
+        .strip_prefix("auth ")
+        .is_some_and(|candidate| pin_matches(candidate.trim(), pin))
+}
+
+/// PIN carried by an `X-Pin` header. The header name is matched
+/// case-insensitively (HTTP field names are), the value is not.
+fn header_pin_ok(request_head: &str, pin: &str) -> bool {
+    request_head.lines().any(|line| {
+        line.to_ascii_lowercase()
+            .starts_with("x-pin:")
+            .then(|| line["x-pin:".len()..].trim())
+            .is_some_and(|candidate| pin_matches(candidate, pin))
+    })
+}
+
+/// PIN carried as a `?pin=` query parameter — needed because an `<img src>`
+/// cannot send headers, so `/stream` has no other way to authenticate.
+///
+/// Parsed as an actual parameter rather than searched for as a substring: the
+/// old `target.contains("pin=<pin>")` also accepted `?notpin=<pin>` and
+/// `?pin=<pin>trailing-garbage`. Neither is exploitable without already knowing
+/// the PIN, but "close enough to the right string" is not a check.
+fn query_pin_ok(request_head: &str, pin: &str) -> bool {
+    request_head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|target| target.split_once('?'))
+        .is_some_and(|(_, query)| {
+            query
+                .split('&')
+                .any(|kv| kv.strip_prefix("pin=").is_some_and(|c| pin_matches(c, pin)))
+        })
+}
+
 /// `f64::from_str` accepts "NaN" / "inf" / "infinity", and `{:.2}` formats them
 /// straight back out, so without this a frame of `m NaN NaN` would reach the
 /// compositor's pointer math verbatim. Reject rather than clamp: no legitimate
@@ -239,8 +289,7 @@ fn handle_ws(stream: TcpStream, pin: &str) {
     // wrong PIN) closes the connection before any input can be injected.
     let authed = matches!(
         ws.read(),
-        Ok(tungstenite::Message::Text(t))
-            if t.strip_prefix("auth ").map(str::trim) == Some(pin)
+        Ok(tungstenite::Message::Text(t)) if auth_frame_ok(&t, pin)
     );
     if !authed {
         eprintln!("[cce-remote] auth failed: {peer}");
@@ -294,13 +343,9 @@ fn handle_ws(stream: TcpStream, pin: &str) {
 /// the client closes the socket. PIN via X-Pin header or ?pin= query (an
 /// <img src> can't carry headers).
 fn handle_stream(mut stream: TcpStream, request_head: &str, pin: &str) {
-    let pin_ok = request_head.lines().any(|l| {
-        let lower = l.to_ascii_lowercase();
-        lower.starts_with("x-pin:") && l[6..].trim() == pin
-    }) || request_head
-        .split_whitespace()
-        .nth(1)
-        .is_some_and(|target| target.contains(&format!("pin={pin}")));
+    // Header OR query: an <img src> cannot carry a header, so /stream accepts
+    // the PIN in the URL. /shot does not — see handle_http.
+    let pin_ok = header_pin_ok(request_head, pin) || query_pin_ok(request_head, pin);
     if !pin_ok {
         let _ = write!(stream, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         return;
@@ -371,11 +416,9 @@ fn handle_http(mut stream: TcpStream, request_head: &str, pin: &str) {
     // /shot: the focused window's screenshot, PIN-gated via the X-Pin header
     // (the page fetch()es it — an <img src> couldn't carry a header).
     if request_head.starts_with("GET /shot") {
-        let pin_ok = request_head.lines().any(|l| {
-            let lower = l.to_ascii_lowercase();
-            lower.starts_with("x-pin:") && l[6..].trim() == pin
-        });
-        if !pin_ok {
+        // Header only: the page fetch()es this one, so unlike /stream there is
+        // no reason to let the PIN travel in a URL (where it lands in logs).
+        if !header_pin_ok(request_head, pin) {
             let _ = write!(stream, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
             return;
         }
@@ -473,6 +516,98 @@ mod tests {
         let cmds = translate(frame).expect("frame should translate");
         assert_eq!(cmds.len(), 1, "{frame:?} yielded {cmds:?}, expected one command");
         cmds.into_iter().next().unwrap()
+    }
+
+    // ---- the pairing PIN ----
+    //
+    // The other half of the security model: translate() decides what a paired
+    // client may say, these decide who is paired at all. Both are reachable by
+    // anyone who can open a socket to this port.
+
+    const PIN: &str = "123456";
+
+    fn head(lines: &[&str]) -> String {
+        format!("{}\r\n\r\n", lines.join("\r\n"))
+    }
+
+    #[test]
+    fn ws_auth_requires_exactly_auth_then_pin() {
+        assert!(auth_frame_ok("auth 123456", PIN));
+        assert!(auth_frame_ok("auth   123456  ", PIN)); // value is trimmed
+        for frame in [
+            "auth 123457",      // wrong PIN
+            "auth 12345",       // prefix of it
+            "auth 1234567",     // superstring of it
+            "auth ",            // empty candidate
+            "auth",             // no separator
+            "AUTH 123456",      // verb is case-sensitive
+            "auth123456",
+            " auth 123456",     // must be the whole frame, unprefixed
+            "m 1 2",            // an input event before pairing
+            "",
+        ] {
+            assert!(!auth_frame_ok(frame, PIN), "{frame:?} must not authenticate");
+        }
+    }
+
+    #[test]
+    fn an_empty_pin_authorizes_nothing() {
+        // load_or_create_pin() regenerates on an empty file, so this should be
+        // unreachable — which is exactly why it is worth pinning. A truncated
+        // PIN file must fail closed, not open.
+        assert!(!auth_frame_ok("auth ", ""));
+        assert!(!auth_frame_ok("auth", ""));
+        assert!(!header_pin_ok(&head(&["GET /shot HTTP/1.1", "X-Pin:"]), ""));
+        assert!(!header_pin_ok(&head(&["GET /shot HTTP/1.1", "X-Pin: "]), ""));
+        assert!(!query_pin_ok(&head(&["GET /stream?pin= HTTP/1.1"]), ""));
+    }
+
+    #[test]
+    fn x_pin_header_is_matched_case_insensitively_by_name_only() {
+        for name in ["X-Pin", "x-pin", "X-PIN", "x-PiN"] {
+            let h = head(&["GET /shot HTTP/1.1", &format!("{name}: {PIN}"), "Host: x"]);
+            assert!(header_pin_ok(&h, PIN), "{name} should be accepted");
+        }
+        // Value whitespace is trimmed; the value itself must match exactly.
+        assert!(header_pin_ok(&head(&["GET /shot HTTP/1.1", "X-Pin:   123456  "]), PIN));
+        for bad in ["X-Pin: 123457", "X-Pin: 12345", "X-Pin: 1234567", "X-Pin:", "X-Pinx: 123456"] {
+            let h = head(&["GET /shot HTTP/1.1", bad]);
+            assert!(!header_pin_ok(&h, PIN), "{bad:?} must not authenticate");
+        }
+        // No header at all.
+        assert!(!header_pin_ok(&head(&["GET /shot HTTP/1.1", "Host: x"]), PIN));
+    }
+
+    #[test]
+    fn query_pin_is_a_parameter_not_a_substring() {
+        assert!(query_pin_ok(&head(&["GET /stream?pin=123456 HTTP/1.1"]), PIN));
+        assert!(query_pin_ok(&head(&["GET /stream?pin=123456&g=7 HTTP/1.1"]), PIN));
+        assert!(query_pin_ok(&head(&["GET /stream?g=7&pin=123456 HTTP/1.1"]), PIN));
+        for bad in [
+            "GET /stream?notpin=123456 HTTP/1.1",  // substring match used to pass this
+            "GET /stream?pin=1234567 HTTP/1.1",    // and this
+            "GET /stream?xpin=123456 HTTP/1.1",
+            "GET /stream?pin=12345 HTTP/1.1",
+            "GET /stream?pin= HTTP/1.1",
+            "GET /stream?pin HTTP/1.1",
+            "GET /stream HTTP/1.1",                // no query at all
+            "GET /pin=123456 HTTP/1.1",            // in the PATH, not the query
+        ] {
+            assert!(!query_pin_ok(&head(&[bad]), PIN), "{bad:?} must not authenticate");
+        }
+    }
+
+    #[test]
+    fn the_two_http_gates_are_not_interchangeable() {
+        // /stream takes either (an <img src> cannot send headers); /shot takes
+        // the header only, so the PIN stays out of URLs and logs where it can.
+        let query_only = head(&["GET /stream?pin=123456 HTTP/1.1", "Host: x"]);
+        assert!(query_pin_ok(&query_only, PIN));
+        assert!(!header_pin_ok(&query_only, PIN), "/shot must not accept a URL PIN");
+
+        let header_only = head(&["GET /shot HTTP/1.1", "X-Pin: 123456"]);
+        assert!(header_pin_ok(&header_only, PIN));
+        assert!(!query_pin_ok(&header_only, PIN));
     }
 
     #[test]
