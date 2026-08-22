@@ -1,0 +1,21 @@
+[Unit]
+Description=cce-remote — phone trackpad/keyboard bridge
+PartOf=cce-session.target
+After=cce-session.target
+
+[Service]
+Type=simple
+# No args = serve on 0.0.0.0:17017 (a single argument overrides the port).
+# The server bridges WebSocket input from the phone page into the compositor
+# control socket at /tmp/cce-{WAYLAND_DISPLAY}.sock, so it must run inside the
+# session whose display it should drive: WAYLAND_DISPLAY is read from the
+# environment once at startup and fixes the target session for the process's
+# whole life. That is why this is WantedBy=cce-session.target rather than
+# default.target — it has to inherit the session environment, and it must go
+# away with the session rather than linger pointed at a dead socket.
+ExecStart=%h/.local/bin/cce-remote
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=cce-session.target
