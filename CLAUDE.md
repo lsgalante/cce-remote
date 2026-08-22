@@ -153,9 +153,21 @@ deltas, so near-unity is the trackpad-like 1:1 feel. A 300px swipe used to scrol
 
 The awkward part: **there is no WebSocket client on this machine** (no `websocat`, no
 `wscat`, no python `websockets`), so the WS path — which is most of the logic — can only
-be driven from a real phone, or by writing a throwaway client. `translate()` is a pure
-function over `&str` with no test module; that is the cheap place to lock behavior down
-if you touch the whitelist.
+be driven from a real phone, or by writing a throwaway client.
+
+`translate()` is the exception, and it is where the crate's one invariant is actually
+enforced, so it carries the crate's only tests (`cargo test -p cce-remote`, 9 of them,
+in `main.rs`). They cover the accepted shapes and — more to the point — everything that
+must be refused: unknown verbs *including the compositor's own command names*,
+malformed and missing arguments, `wf` targets outside `safe_token`, unwhitelisted `cmd`
+names, and the property that no input can make the output span two lines (an embedded
+newline would be a second command, since `control_command` appends one). Extend them
+when you touch the whitelist; they are much cheaper than the phone.
+
+One of them, `non_finite_coordinates_are_dropped`, guards a hole that was live until
+2026-08-22: `f64::from_str` accepts `"NaN"`/`"inf"` and `{:.2}` prints them straight back,
+so `m NaN 1` used to reach the compositor's pointer math verbatim. `parse().ok()` is not
+sufficient validation for a float — hence `finite()`.
 
 What can be checked from the desktop, and is confirmed working:
 

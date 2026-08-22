@@ -97,6 +97,14 @@ fn safe_token(t: &str) -> bool {
         && t.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':'))
 }
 
+/// `f64::from_str` accepts "NaN" / "inf" / "infinity", and `{:.2}` formats them
+/// straight back out, so without this a frame of `m NaN NaN` would reach the
+/// compositor's pointer math verbatim. Reject rather than clamp: no legitimate
+/// frame from the page contains one.
+fn finite(v: f64) -> Option<f64> {
+    v.is_finite().then_some(v)
+}
+
 /// Translate one WS frame into a control-socket command. Returns None for
 /// frames that don't parse — they're dropped, never forwarded raw (the WS
 /// payload is untrusted; only these fixed shapes reach the compositor).
@@ -104,13 +112,13 @@ fn translate(frame: &str) -> Option<String> {
     let mut it = frame.split_ascii_whitespace();
     let cmd = match it.next()? {
         "m" => {
-            let dx: f64 = it.next()?.parse().ok()?;
-            let dy: f64 = it.next()?.parse().ok()?;
+            let dx = finite(it.next()?.parse().ok()?)?;
+            let dy = finite(it.next()?.parse().ok()?)?;
             format!("pointer-move-by {dx:.2} {dy:.2}")
         }
         "s" => {
-            let dy: f64 = it.next()?.parse().ok()?;
-            let dx: f64 = it.next().unwrap_or("0").parse().ok()?;
+            let dy = finite(it.next()?.parse().ok()?)?;
+            let dx = finite(it.next().unwrap_or("0").parse().ok()?)?;
             format!("pointer-scroll {dy:.3} {dx:.3}")
         }
         "b" => {
@@ -440,5 +448,137 @@ fn main() {
                 handle_http(s, &head, &pin);
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // `translate` is the security boundary of this crate: it is the only thing
+    // between an untrusted WebSocket frame and a control socket that can move
+    // the pointer and type into whatever the user has focused. These tests
+    // cover the two halves of that job — the fixed shapes it accepts, and
+    // everything it must refuse — because a regression here is not a wrong
+    // pixel, it is remote input injection.
+
+    #[test]
+    fn pointer_and_scroll_carry_fixed_precision() {
+        assert_eq!(translate("m 1 -2").unwrap(), "pointer-move-by 1.00 -2.00");
+        assert_eq!(translate("m 0.126 -0.126").unwrap(), "pointer-move-by 0.13 -0.13");
+        // Exact .5 ties round half-to-even, not away from zero — sub-pixel
+        // detail the page never notices, but pin it so a formatting change
+        // shows up here rather than as drifting pointer feel.
+        assert_eq!(translate("m 0.125 0.135").unwrap(), "pointer-move-by 0.12 0.14");
+        // `s` takes dy first; dx is optional and defaults to 0.
+        assert_eq!(translate("s 5").unwrap(), "pointer-scroll 5.000 0.000");
+        assert_eq!(translate("s 5 -1.5").unwrap(), "pointer-scroll 5.000 -1.500");
+    }
+
+    #[test]
+    fn buttons_map_to_press_release_click() {
+        assert_eq!(translate("b left down").unwrap(), "pointer-press left");
+        assert_eq!(translate("b left up").unwrap(), "pointer-release left");
+        assert_eq!(translate("b right click").unwrap(), "pointer-click right");
+        assert_eq!(translate("b middle click").unwrap(), "pointer-click middle");
+    }
+
+    #[test]
+    fn keys_map_to_tap_and_hold() {
+        assert_eq!(translate("k 28").unwrap(), "keypress 28");
+        assert_eq!(translate("kd 42").unwrap(), "key-down 42");
+        assert_eq!(translate("ku 42").unwrap(), "key-up 42");
+    }
+
+    #[test]
+    fn unknown_verbs_are_dropped() {
+        // Note the compositor's own command names: a frame naming one directly
+        // must NOT be honored, or the whitelist would be decorative.
+        for frame in [
+            "", "   ", "x 1", "exit", "spawn foot", "reload",
+            "pointer-click left", "keypress 28", "restart-compositor",
+        ] {
+            assert!(translate(frame).is_none(), "{frame:?} should be dropped");
+        }
+    }
+
+    #[test]
+    fn missing_or_malformed_arguments_are_dropped() {
+        for frame in [
+            "m", "m 1", "m a b", "m 1 b",
+            "s", "s abc", "s 1 abc",
+            "k", "k abc", "k -1", "k 1.5", "k 99999999999999999999",
+            "kd", "ku",
+            "b", "b left", "b left bogus", "b sideways click", "b LEFT click",
+            "wf", "cmd",
+        ] {
+            assert!(translate(frame).is_none(), "{frame:?} should be dropped");
+        }
+    }
+
+    #[test]
+    fn non_finite_coordinates_are_dropped() {
+        // The hazard is real rather than theoretical — this is exactly what
+        // finite() exists to stop, and it is why parse().ok() alone is not
+        // enough validation for a float.
+        assert!("NaN".parse::<f64>().is_ok());
+        assert_eq!(format!("{:.2}", "NaN".parse::<f64>().unwrap()), "NaN");
+        assert_eq!(format!("{:.2}", "inf".parse::<f64>().unwrap()), "inf");
+
+        for frame in [
+            "m NaN 1", "m 1 NaN", "m inf 0", "m -inf 0", "m 1 infinity",
+            "s NaN", "s 1 inf", "s nan 0",
+        ] {
+            assert!(translate(frame).is_none(), "{frame:?} should be dropped");
+        }
+    }
+
+    #[test]
+    fn focus_target_is_restricted_to_safe_tokens() {
+        assert_eq!(translate("wf 12").unwrap(), "focus-window 12");
+        assert_eq!(translate("wf org.cce.files").unwrap(), "focus-window org.cce.files");
+        assert_eq!(translate("wf a-b_c:d.1").unwrap(), "focus-window a-b_c:d.1");
+        for frame in [
+            "wf ../etc", "wf a/b", "wf a;b", "wf a$b", "wf a*b",
+            "wf a'b", "wf a\"b", "wf a|b", "wf a&b", "wf a\\b",
+        ] {
+            assert!(translate(frame).is_none(), "{frame:?} should be dropped");
+        }
+        // safe_token's length bound, exercised on both sides.
+        assert!(translate(&format!("wf {}", "a".repeat(128))).is_some());
+        assert!(translate(&format!("wf {}", "a".repeat(129))).is_none());
+    }
+
+    #[test]
+    fn named_commands_are_whitelisted_never_passed_through() {
+        assert_eq!(translate("cmd restart-compositor").unwrap(), "restart-compositor");
+        // Trailing junk is discarded, not appended.
+        assert_eq!(translate("cmd restart-compositor rm -rf").unwrap(), "restart-compositor");
+        for frame in ["cmd exit", "cmd reload", "cmd spawn foot", "cmd RESTART-COMPOSITOR"] {
+            assert!(translate(frame).is_none(), "{frame:?} should be dropped");
+        }
+    }
+
+    #[test]
+    fn a_newline_can_never_smuggle_a_second_command() {
+        // control_command() appends "\n", so an embedded newline in the output
+        // would be a second command on the socket. split_ascii_whitespace()
+        // eats it and every command is REBUILT from re-parsed values, so
+        // trailing tokens are discarded rather than forwarded.
+        assert_eq!(translate("m 1 2\npointer-click left").unwrap(), "pointer-move-by 1.00 2.00");
+        assert_eq!(translate("wf 12\nexit").unwrap(), "focus-window 12");
+
+        // The property that matters, over every shape the page can send plus
+        // deliberate junk: whatever comes out is a single line.
+        for frame in [
+            "m 1 2\nexit", "m 1\n2", "s 1\nexit", "b left\nclick", "b left click\nexit",
+            "k 28\nexit", "kd 42\nexit", "ku 42\nexit", "wf 1\nexit",
+            "cmd restart-compositor\nexit", "m\t1\t2", "wf\n12", "  m   1   2  ",
+        ] {
+            if let Some(out) = translate(frame) {
+                assert!(!out.contains('\n'), "{frame:?} produced a multi-line command: {out:?}");
+                assert!(!out.contains('\r'), "{frame:?} produced a CR: {out:?}");
+            }
+        }
     }
 }
