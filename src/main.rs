@@ -31,6 +31,22 @@ mod stream;
 mod winstream;
 
 const INDEX_HTML: &str = include_str!("../index.html");
+
+/// Identity of the embedded page (FNV-1a). Sent to the page after auth so it
+/// can notice that a restarted server is serving a NEWER page than the one it
+/// is running, and reload itself — the page is baked into the binary, so
+/// every UI change otherwise needs a manual refresh on the phone.
+fn page_version() -> &'static str {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(|| {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in INDEX_HTML.bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        format!("{h:016x}")
+    })
+}
 const DEFAULT_PORT: u16 = 17017;
 
 fn control_socket_path() -> String {
@@ -396,6 +412,7 @@ fn handle_ws(stream: TcpStream, pin: &str, ip: std::net::IpAddr, limiter: &RateL
     limiter.record_success(ip);
     let _ = ws.get_ref().set_read_timeout(None);
     let _ = ws.send(tungstenite::Message::Text("auth ok".into()));
+    let _ = ws.send(tungstenite::Message::Text(format!("ver {}", page_version())));
     println!("[cce-remote] client connected: {peer}");
     loop {
         match ws.read() {
@@ -551,9 +568,11 @@ fn handle_http(mut stream: TcpStream, request_head: &str, pin: &str, ip: std::ne
     } else {
         ("404 Not Found", "not found")
     };
+    // no-cache: a reload (manual or the automatic version-mismatch one) must
+    // refetch the page, not revalidate a heuristic cache entry.
     let _ = write!(
         stream,
-        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-cache\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len(),
     );
 }

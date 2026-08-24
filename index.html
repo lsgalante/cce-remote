@@ -100,7 +100,7 @@
 // ── WebSocket + pairing ──────────────────────────────────────────────
 // First frame must be `auth <pin>` (the PIN cce-remote prints at startup).
 // Remembered in localStorage after the first successful pairing.
-let ws = null, authed = false;
+let ws = null, authed = false, pageVer = null;
 const status = document.getElementById("status");
 function askPin(msg) {
   const pin = window.prompt(msg || "cce-remote pairing PIN (shown in the server terminal):");
@@ -117,6 +117,15 @@ function connect() {
   ws.onmessage = e => {
     if (typeof e.data === "string" && e.data.startsWith("windows ")) { renderSwitcher(e.data.slice(8)); }
     else if (typeof e.data === "string" && e.data.startsWith("ploc ")) { updateCursorMarker(e.data.slice(5)); }
+    else if (typeof e.data === "string" && e.data.startsWith("ver ")) {
+      // The server names the page version it serves. First connect pins it;
+      // a DIFFERENT version on a later reconnect means the service restarted
+      // onto new code — reload to pick it up. (The input WS retries every 1s,
+      // so this fires moments after a restart, automatically.)
+      const v = e.data.slice(4);
+      if (pageVer === null) pageVer = v;
+      else if (pageVer !== v) location.reload();
+    }
     else if (e.data === "auth ok") { authed = true; status.textContent = "●"; status.style.color = "#5fbf6f"; }
     else if (e.data === "auth fail") {
       localStorage.removeItem("cce-remote-pin");
@@ -417,6 +426,7 @@ mbtn.addEventListener("click", () => {
   menuEl.innerHTML = "";
   menuRow(viewMode ? "Switch to trackpad" : "Show focused window (live view)", false,
     () => setViewMode(!viewMode));
+  menuRow("Reload page", false, () => location.reload());
   menuRow("Restart compositor", true, () => {
     if (window.confirm("Restart the compositor? Every app in the session will close, then the session relaunches.")) {
       send("cmd restart-compositor");
