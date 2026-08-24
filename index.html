@@ -62,6 +62,12 @@
              background: #191b23; border: 1px solid #2e3140; border-radius: 8px;
              font-size: 15px; color: #cfe8e8; white-space: pre-wrap; word-break: break-all; }
   #preview.show { display: block; }
+  /* While the software keyboard is up, the preview floats with its bottom
+     just above the keyboard (placed by JS from visualViewport) — eyes are on
+     the keyboard, not the top of the screen. Display-only: never intercept
+     pad gestures underneath it. */
+  #preview.float { position: fixed; left: 8px; right: 8px; margin: 0; z-index: 6;
+                   pointer-events: none; background: rgba(25,27,35,0.94); }
   #preview.show::after { content: "▍"; color: #7dffff; animation: blink 1s steps(1) infinite; }
   @keyframes blink { 50% { opacity: 0; } }
   #status { position: fixed; top: 4px; right: 10px; font-size: 10px; color: #4a4d5c; }
@@ -485,9 +491,27 @@ function armKb() { kb.value = SENTINEL; kb.setSelectionRange(SENTINEL.length, SE
 // (The target app shows the real text; this is feedback for eyes-on-phone.)
 const preview = document.getElementById("preview");
 let typed = "";
+// The iOS keyboard overlays the page without any CSS-visible layout change;
+// visualViewport is the only honest signal (its height shrinks, and offsetTop
+// compensates for iOS sliding a standalone page). Reposition on viewport
+// changes AND on every text change, since wrapping alters the preview height.
+const vv = window.visualViewport;
+function placePreview() {
+  const kbOpen = vv && document.activeElement === kb
+    && vv.height < window.innerHeight * 0.85;
+  preview.classList.toggle("float", !!kbOpen);
+  preview.style.top = kbOpen
+    ? Math.max(0, vv.offsetTop + vv.height - preview.offsetHeight - 8) + "px"
+    : "";
+}
+if (vv) {
+  vv.addEventListener("resize", placePreview);
+  vv.addEventListener("scroll", placePreview);
+}
 function updPreview() {
   preview.textContent = typed;
   preview.classList.toggle("show", document.activeElement === kb);
+  placePreview();
 }
 kb.addEventListener("focus", () => { armKb(); updPreview(); });
 kb.addEventListener("blur", () => { typed = ""; updPreview(); });
