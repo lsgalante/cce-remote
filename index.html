@@ -31,9 +31,10 @@
                    border-radius: 10px; }
   #clicks button:active, #bar button:active { background: #2c5f69; }
   #kb { position: absolute; opacity: 0.02; width: 1px; height: 1px; left: -10px; top: -10px; }
-  /* Zoom/pan transform lives on the WRAPPER, never the <img>: iOS Safari
-     stops repainting a GPU-promoted layer when its multipart-MJPEG <img>
-     updates (black square). The img stays in the normal paint path. */
+  /* Zoom/pan transform lives on the WRAPPER: getBoundingClientRect then
+     reflects it, so tap mapping stays correct zoomed. (Historically this also
+     dodged an iOS bug where a transformed multipart-MJPEG <img> stopped
+     repainting; the live view is a canvas now, but the structure stays.) */
   #screenwrap { display: none; position: absolute; inset: 0; z-index: 2;
                 transform-origin: 0 0; border-radius: 12px; overflow: hidden; }
   #pad.view #screenwrap { display: block; }
@@ -84,7 +85,7 @@
 </div>
 <div id="preview"></div>
 <div id="pad"><div class="hint">drag = move · tap = click · 2-finger drag = scroll<br>2-finger tap = right click · hold = drag</div>
-  <div id="screenwrap"><img id="screen" draggable="false"></div>
+  <div id="screenwrap"><canvas id="screen" width="0" height="0"></canvas></div>
   <div id="vcursor"></div>
   <div id="switcher"></div>
   <div id="menu"></div>
@@ -147,24 +148,57 @@ const ACCEL = 1.6, SCROLL = 0.8;
 let touches = new Map(), moved = 0, startT = 0, maxFingers = 0, startX = 0, startY = 0;
 let dragging = false, dragTimer = null, pendDx = 0, pendDy = 0, pendSy = 0, flushT = null;
 
-// ── Window view mode: live MJPEG stream of the focused window; taps
-// click it. The <img> renders /stream (multipart/x-mixed-replace)
-// natively; winRect for tap mapping is kept fresh by polling `wl` over
-// the WS (the stream follows focus server-side).
+// ── Window view mode: live view of the focused window; taps click it.
+// Frames arrive as JPEG binaries on a dedicated /wstream WebSocket, drawn to
+// the canvas; winRect for tap mapping is kept fresh by polling `wl` over the
+// input WS (the stream follows focus server-side).
+//
+// Delivery is ACK-CLOCKED: after rendering a frame we send "n", and only then
+// does the server send its NEWEST frame. At most one frame is ever in flight,
+// so a slow link costs frame rate, never accumulating lag — the old MJPEG
+// path queued frames in the TCP buffer and grew seconds behind. The ack also
+// times the whole pipeline for the server's resolution/quality adaptation,
+// which is why it is sent after drawImage, not on receipt.
 let viewMode = false, winRect = null, rectTimer = null, cursorTimer = null;
 const screenEl = document.getElementById("screen");
-// MJPEG in an <img> shows blank when its HTTP connection ends, and a browser
-// never re-requests an unchanged src — so reconnect on error, and via a
-// watchdog for silent stalls (a nonce forces a fresh request each time).
-let streamGen = 0, lastFrameAt = 0, watchdog = null;
+const screenCtx = screenEl.getContext("2d");
+let sws = null, lastFrameAt = 0, watchdog = null;
 function streamStart() {
+  if (sws) { const old = sws; sws = null; try { old.close(); } catch (_) {} }
   const pin = localStorage.getItem("cce-remote-pin") || "";
-  streamGen++;
+  const s = new WebSocket("ws://" + location.host + "/wstream");
+  s.binaryType = "arraybuffer";
+  sws = s;
   lastFrameAt = Date.now();
-  screenEl.src = "/stream?pin=" + encodeURIComponent(pin) + "&g=" + streamGen;
+  let paired = false;
+  s.onopen = () => s.send("auth " + pin);
+  s.onmessage = async e => {
+    if (typeof e.data === "string") {
+      if (e.data === "auth ok") { paired = true; s.send("n"); }
+      return;
+    }
+    lastFrameAt = Date.now();
+    try {
+      const bmp = await createImageBitmap(new Blob([e.data], { type: "image/jpeg" }));
+      if (screenEl.width !== bmp.width || screenEl.height !== bmp.height) {
+        screenEl.width = bmp.width;
+        screenEl.height = bmp.height;
+      }
+      screenCtx.drawImage(bmp, 0, 0);
+      bmp.close();
+    } catch (_) {}
+    if (sws === s && s.readyState === 1) s.send("n");
+  };
+  // Reconnect only if this connection ever paired: a stale PIN would
+  // otherwise retry-loop failures into the server's rate limiter and lock
+  // the phone's address out of the INPUT socket too.
+  s.onclose = () => { if (viewMode && sws === s && paired) setTimeout(streamStart, 600); };
 }
-screenEl.addEventListener("load", () => { lastFrameAt = Date.now(); });
-screenEl.addEventListener("error", () => { if (viewMode) setTimeout(streamStart, 600); });
+function streamStop() {
+  if (sws) { const old = sws; sws = null; try { old.close(); } catch (_) {} }
+  screenEl.width = 0;
+  screenEl.height = 0;
+}
 function updateRect(wins) {
   const f = wins.find(w => w.focused && w.mode !== "Status");
   if (f) winRect = { id: f.id, x: f.x, y: f.y, w: f.w, h: f.h };
@@ -191,12 +225,12 @@ function clampPan() {
 const vcursor = document.getElementById("vcursor");
 let ptr = null; // last known pointer position in layout px (from ploc + prediction)
 function placeMarker(lx, ly) {
-  if (!viewMode || !winRect || !screenEl.naturalWidth) { vcursor.classList.remove("on"); return; }
+  if (!viewMode || !winRect || !screenEl.width) { vcursor.classList.remove("on"); return; }
   const u = (lx - winRect.x) / winRect.w, v = (ly - winRect.y) / winRect.h;
   if (!(u >= 0 && u <= 1 && v >= 0 && v <= 1)) { vcursor.classList.remove("on"); return; }
   const box = screenEl.getBoundingClientRect();
-  const scale = Math.min(box.width / screenEl.naturalWidth, box.height / screenEl.naturalHeight);
-  const dw = screenEl.naturalWidth * scale, dh = screenEl.naturalHeight * scale;
+  const scale = Math.min(box.width / screenEl.width, box.height / screenEl.height);
+  const dw = screenEl.width * scale, dh = screenEl.height * scale;
   const padBox = pad.getBoundingClientRect();
   vcursor.style.left = (box.left - padBox.left + (box.width - dw) / 2 + u * dw) + "px";
   vcursor.style.top = (box.top - padBox.top + (box.height - dh) / 2 + v * dh) + "px";
@@ -221,10 +255,10 @@ function predictMarker(dLx, dLy) {
 // touch point (viewport px) → layout px inside the focused window,
 // accounting for the contain-fit letterbox. null when off the image.
 function mapToWindow(cx, cy) {
-  if (!winRect || !screenEl.naturalWidth) return null;
+  if (!winRect || !screenEl.width) return null;
   const box = screenEl.getBoundingClientRect();
-  const scale = Math.min(box.width / screenEl.naturalWidth, box.height / screenEl.naturalHeight);
-  const dw = screenEl.naturalWidth * scale, dh = screenEl.naturalHeight * scale;
+  const scale = Math.min(box.width / screenEl.width, box.height / screenEl.height);
+  const dw = screenEl.width * scale, dh = screenEl.height * scale;
   const ox = box.left + (box.width - dw) / 2, oy = box.top + (box.height - dh) / 2;
   const u = (cx - ox) / dw, v = (cy - oy) / dh;
   if (u < 0 || u > 1 || v < 0 || v > 1) return null;
@@ -351,17 +385,18 @@ function setViewMode(on) {
     send("wl"); // prime winRect
     rectTimer = setInterval(() => send("wl"), 2000);
     cursorTimer = setInterval(() => send("pl"), 120);
-    // Reconnect if no frame has loaded for a while (the compositor keepalives
-    // every ≤15s, so ~20s of silence means the connection is dead, not idle).
+    // Reconnect if no frame arrives for a while (the frame sources force
+    // keepalive frames every ≤20s, so ~30s of silence means the connection
+    // is dead, not idle).
     watchdog = setInterval(() => {
-      if (viewMode && Date.now() - lastFrameAt > 20000) streamStart();
+      if (viewMode && Date.now() - lastFrameAt > 30000) streamStart();
     }, 5000);
   } else {
     clearInterval(rectTimer);
     clearInterval(cursorTimer);
     clearInterval(watchdog);
     vcursor.classList.remove("on");
-    screenEl.src = "data:,"; // closes the stream connection
+    streamStop();
   }
 }
 const menuEl = document.getElementById("menu");

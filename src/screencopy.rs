@@ -13,7 +13,6 @@
 //! coordinates, which equals layout coordinates when the (only) output sits
 //! at 0,0 — true for this DE's eDP-1 setup, same assumption grim ran under.
 
-use std::io::Write;
 use std::os::fd::AsFd;
 use std::time::{Duration, Instant};
 
@@ -25,10 +24,6 @@ use wayland_protocols_wlr::screencopy::v1::client::{
     zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
 };
 
-/// Longest edge of the encoded frame, in px — the downscale factor is chosen
-/// per frame to stay under this.
-const MAX_EDGE: u32 = 560;
-const JPEG_QUALITY: u8 = 60;
 
 #[derive(Default)]
 struct CapState {
@@ -210,14 +205,15 @@ impl CaptureSession {
 
     /// Capture one frame of `rect` (output-local logical px). With
     /// `use_damage`, blocks until the region changes or `timeout` — a timeout
-    /// returns Ok(None) so the caller can force a keepalive frame. The frame
-    /// is returned already JPEG-encoded.
+    /// returns Ok(None) so the caller can force a keepalive frame. The pixels
+    /// are returned RAW (copied out of the shm slot, which is reused);
+    /// encoding happens at send time so dropped frames cost nothing.
     pub fn next_frame(
         &mut self,
         rect: (i32, i32, i32, i32),
         use_damage: bool,
         timeout: Duration,
-    ) -> Result<Option<Vec<u8>>, String> {
+    ) -> Result<Option<crate::stream::Payload>, String> {
         self.state = CapState::default();
         let frame = self.manager.capture_output_region(
             1, // overlay the cursor — the remote wants to see it
@@ -257,37 +253,41 @@ impl CaptureSession {
         }
         frame.destroy();
         let slot = self.slot.as_ref().unwrap();
-        Ok(Some(encode_jpeg(&slot.map, slot.meta)?))
+        let (w, h, stride, format) = slot.meta;
+        // byte offsets of R,G,B within each little-endian 32-bit pixel
+        let rgb = match format {
+            wl_shm::Format::Xrgb8888 | wl_shm::Format::Argb8888 => (2usize, 1usize, 0usize),
+            _ => (0usize, 1usize, 2usize), // Xbgr8888 / Abgr8888
+        };
+        let size = (stride * h) as usize;
+        Ok(Some(crate::stream::Payload::Raw {
+            data: slot.map[..size].to_vec(),
+            w,
+            h,
+            stride,
+            rgb,
+        }))
     }
 }
 
-/// Box-downscale the 32-bit shm pixels to ≤ MAX_EDGE and encode as JPEG.
-fn encode_jpeg(
-    map: &memmap2::MmapMut,
-    (w, h, stride, format): (u32, u32, u32, wl_shm::Format),
-) -> Result<Vec<u8>, String> {
-    // byte offsets of R,G,B within each little-endian 32-bit pixel
-    let rgb_at = match format {
-        wl_shm::Format::Xrgb8888 | wl_shm::Format::Argb8888 => (2usize, 1usize, 0usize),
-        _ => (0usize, 1usize, 2usize), // Xbgr8888 / Abgr8888
-    };
-    downscale_encode(map, w, h, stride, rgb_at)
-}
-
-/// Shared by both frame sources (screencopy shm and the compositor's
-/// window-stream RGBA): box-downscale 32-bit pixels to ≤ MAX_EDGE and JPEG
-/// them. `rgb_at` gives the byte offsets of R,G,B within each 4-byte pixel.
+/// Shared by both raw frame sources (screencopy shm and the compositor's
+/// window-stream RGBA): box-downscale 32-bit pixels to ≤ `max_edge` and JPEG
+/// them at `quality`. `rgb_at` gives the byte offsets of R,G,B within each
+/// 4-byte pixel. Called per SENT frame, with the (edge, quality) the
+/// adaptation ladder picked for the link.
 pub fn downscale_encode(
     data: &[u8],
     w: u32,
     h: u32,
     stride: u32,
     (ri, gi, bi): (usize, usize, usize),
+    max_edge: u32,
+    quality: u8,
 ) -> Result<Vec<u8>, String> {
     if w == 0 || h == 0 || (stride * h) as usize > data.len() {
         return Err("bad frame dimensions".into());
     }
-    let f = ((w.max(h) + MAX_EDGE - 1) / MAX_EDGE).max(1);
+    let f = ((w.max(h) + max_edge - 1) / max_edge).max(1);
     let (ow, oh) = (w / f, h / f);
     let mut rgb = Vec::with_capacity((ow * oh * 3) as usize);
     let fsq = (f * f) as u32;
@@ -309,59 +309,9 @@ pub fn downscale_encode(
         }
     }
     let mut out = Vec::new();
-    let encoder = jpeg_encoder::Encoder::new(&mut out, JPEG_QUALITY);
+    let encoder = jpeg_encoder::Encoder::new(&mut out, quality);
     encoder
         .encode(&rgb, ow as u16, oh as u16, jpeg_encoder::ColorType::Rgb)
         .map_err(|e| e.to_string())?;
     Ok(out)
-}
-
-/// Drive `session` frames into an MJPEG multipart writer until the client
-/// disconnects. `rect_of_focused` re-resolves the focused window (layout px).
-pub fn stream_mjpeg(
-    tcp: &mut std::net::TcpStream,
-    rect_of_focused: impl Fn() -> Option<(i32, i32, i32, i32)>,
-) -> Result<(), String> {
-    let mut session = CaptureSession::new()?;
-    let mut rect = rect_of_focused();
-    let mut rect_at = Instant::now();
-    let mut force_full = true; // first frame immediately; also after timeouts
-    loop {
-        if rect_at.elapsed() > Duration::from_millis(500) {
-            if let Some(r) = rect_of_focused() {
-                if Some(r) != rect {
-                    force_full = true; // focus moved: don't wait for damage
-                }
-                rect = Some(r);
-            }
-            rect_at = Instant::now();
-        }
-        let Some(r) = rect else {
-            std::thread::sleep(Duration::from_millis(400));
-            rect = rect_of_focused();
-            continue;
-        };
-        // 20s damage timeout doubles as a keepalive: the forced frame's write
-        // is what detects a silently-gone client.
-        let timeout = if force_full { Duration::from_secs(5) } else { Duration::from_secs(20) };
-        match session.next_frame(r, !force_full, timeout) {
-            Ok(Some(jpeg)) => {
-                force_full = false;
-                let head = format!(
-                    "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
-                    jpeg.len()
-                );
-                if tcp.write_all(head.as_bytes()).is_err()
-                    || tcp.write_all(&jpeg).is_err()
-                    || tcp.write_all(b"\r\n").is_err()
-                {
-                    return Ok(()); // client gone
-                }
-                // cap runaway damage bursts (~30 fps)
-                std::thread::sleep(Duration::from_millis(33));
-            }
-            Ok(None) => force_full = true,
-            Err(e) => return Err(e),
-        }
-    }
 }

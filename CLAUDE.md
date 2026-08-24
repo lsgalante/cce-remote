@@ -14,11 +14,14 @@ out — and its entire user interface is one hand-written `index.html` compiled 
 binary with `include_str!`.
 
 Mirroring a sibling app for structure is therefore the wrong instinct here. There is no
-`Application` trait, no `Message` enum, no widget tree. Three files, ~880 lines:
+`Application` trait, no `Message` enum, no widget tree. Four files:
 
-- **`src/main.rs`** — PIN auth, the HTTP/WS dispatch, the frame→command translator.
+- **`src/main.rs`** — PIN auth + rate limiting, the HTTP/WS dispatch, the
+  frame→command translator.
+- **`src/stream.rs`** — live-view delivery: the latest-wins `Slot`, the ack-clocked
+  sender and its adaptation ladder, and the producer that picks a frame source.
 - **`src/screencopy.rs`** — a persistent `wlr-screencopy` client (frame source #2), and
-  `downscale_encode`, shared by both live frame sources.
+  `downscale_encode`, shared by both raw frame sources.
 - **`src/winstream.rs`** — consumer of the compositor's window-stream socket (source #1).
 
 ## The invariant: the control socket is a full-privilege injection channel
@@ -82,7 +85,7 @@ gates consult it, and an unresolvable peer address is refused rather than exempt
 Three properties it must keep, each with a test:
 
 - **Only failures are charged, and a success clears the record.** The page reconnects
-  its stream on every hiccup — an `error` event, the 20s watchdog — each time presenting
+  its stream on every hiccup — a WS close, the no-frame watchdog — each time presenting
   a correct PIN. If those consumed budget, a working client would throttle itself off.
 - **Refill caps at the burst.** Otherwise an idle attacker banks attempts and the limit
   is only an average. Note the test asserts this on `refilled()` *directly*: going
@@ -120,10 +123,47 @@ timer so a fast drag becomes ~80 commands/sec, not one per touch event. One thre
 spawned per accepted connection, uncapped, and a `/stream` connection holds its thread
 for the life of the stream.
 
-## Three frame sources, in preference order
+## The live view: latest-wins delivery, three frame sources
 
-`handle_stream` tries each in turn and falls through on error. All three are live code —
-the fallbacks exist because the first two have real preconditions.
+**Delivery and capture are separate concerns since the 2026-08-22 rework.** The
+original MJPEG path pushed every frame, in order, into a blocking TCP write; nothing on
+this side ever dropped one, so the kernel's send buffer (~10-30 frames) became a queue,
+and the moment wifi throughput dipped below the frame rate the view fell seconds behind
+and never recovered — "fine at first, unusable after a short time".
+
+The delivery design (`stream.rs`) makes that failure structurally impossible:
+
+- A **`Slot`** holds only the newest frame; the producer overwrites it. Overwriting IS
+  the frame-dropping — stale frames cease to exist before they cost encode or network.
+- The page's live view rides **`/wstream`**, a dedicated WebSocket (same `auth <pin>`
+  first-frame gate): the server sends one frame, the page renders it and acks `n`, and
+  only then does the newest frame go out. **At most one frame is ever in flight**, so a
+  degraded link costs frame *rate*, never accumulating latency. The ack is sent after
+  `drawImage`, not on receipt — so the measured send→ack time covers network + decode +
+  paint, which is what the user experiences.
+- That measurement drives an **adaptation ladder** (`LADDER`/`adapt()`): resolution up
+  to 1400px edge when the link is fast, quality degrading before size on the way down,
+  downgrades immediate, upgrades requiring sustained headroom. Encoding happens per
+  *sent* frame at the chosen level.
+- `/wstream` is deliberately a **separate socket from the input WS**: frames are
+  30-150KB and input events are bytes; one TCP stream would head-of-line-block pointer
+  motion behind every frame.
+- `/stream` (MJPEG over HTTP) survives as the **curl-debuggable endpoint**, thin over
+  the same slot at fixed 560/q60. Without acks its TCP buffer can still hold a few
+  frames — fine for debugging, which is all it is for now.
+
+Every accepted socket gets `TCP_NODELAY` — before the rework nothing set it, so Nagle
+was batching tiny input events behind delayed ACKs.
+
+The ceiling above this design is hardware H.264 + WebCodecs/WebRTC (~5-10× fewer bytes),
+at the cost of VAAPI/GStreamer deps and Safari codec quirks. Ack-clocked adaptive JPEG
+is the right cost/benefit for a single-window view on a LAN; revisit only if it proves
+bandwidth-starved in practice.
+
+### The three frame sources
+
+`spawn_producer` tries each in turn. All three are live code — the fallbacks exist
+because the first two have real preconditions.
 
 1. **`winstream`** — subscribe `window focused` on `/tmp/cce-stream-{WAYLAND_DISPLAY}.sock`
    and read `frame <w> <h> <len>` + packed RGBA. Best source: damage is *per window*, it
@@ -137,8 +177,8 @@ the fallbacks exist because the first two have real preconditions.
    still wakes on unrelated screen activity.
 3. **`grim`** — fork per frame, `-s 0.5 -q 65`. ~2.5 fps. The floor.
 
-Frames are box-downscaled to `MAX_EDGE` 560 and JPEG'd at quality 60 (~29KB/frame) by the
-shared `downscale_encode` — tuned for wifi latency and phone-side decode, not fidelity.
+Frames are box-downscaled and JPEG'd by the shared `downscale_encode`, at whatever
+(edge, quality) the ladder picked for the link — not a fixed size anymore.
 
 **The cursor differs between sources, and the page compensates for the worst case.**
 Compositor window-stream frames are surface textures with no cursor composited, so the
@@ -175,14 +215,18 @@ Four of its non-obvious constructs are scar tissue. Do not "clean them up":
   on focus plus a 1s drift-repair timer). iOS never fires `deleteContentBackward` on an
   empty field, so without something to delete, backspace silently does nothing.
   `beforeinput` is used throughout because iOS `keydown` reports keyCode 229.
-- **The zoom/pan transform lives on `#screenwrap`, never on the `<img>`.** iOS Safari
-  stops repainting a GPU-promoted layer when its `multipart/x-mixed-replace` `<img>`
-  updates — the live view goes black.
+- **The zoom/pan transform lives on `#screenwrap`, not the frame element.** Uniform
+  ancestor transform means `getBoundingClientRect` reflects it, keeping tap mapping
+  correct while zoomed. (It also used to dodge an iOS bug where a transformed
+  multipart-MJPEG `<img>` stopped repainting; the view is a `<canvas>` since the
+  2026-08-22 rework, but the structure stays.)
 - **The `overflow: hidden` clip lives on `#pad`, the non-transformed ancestor.** A clip
   on the transformed element scales with its own content and clips nothing.
-- **The stream `<img>` src carries a nonce, plus an `error` handler and a 20s no-frame
-  watchdog.** MJPEG in an `<img>` goes blank when its connection ends, and a browser will
-  not re-request an unchanged src, so a network blip left the view dead forever.
+- **The stream self-heals: reconnect on WS close plus a 30s no-frame watchdog** (the
+  frame sources force keepalives ≤20s, so 30s of silence is a dead connection, not an
+  idle window). One guard worth keeping: the page only auto-reconnects `/wstream` if
+  that connection *paired successfully* — retry-looping a stale PIN would feed the
+  rate limiter and lock the phone's address out of the input socket too.
 
 `SCROLL = 0.8`, not the 0.045 it started as: axis values reach clients as surface-px
 deltas, so near-unity is the trackpad-like 1:1 feel. A 300px swipe used to scroll one line.
@@ -194,7 +238,7 @@ The awkward part: **there is no WebSocket client on this machine** (no `websocat
 be driven from a real phone, or by writing a throwaway client.
 
 The pure functions are the exception, and they are where the crate's invariants are
-actually enforced, so they carry all the tests (`cargo test -p cce-remote`, 15 of them,
+actually enforced, so they carry all the tests (`cargo test -p cce-remote`, 26 of them,
 in `main.rs`) — `translate()` for what a paired client may say, and the three PIN gates
 for who is paired at all. They cover the accepted shapes and — more to the point —
 everything that

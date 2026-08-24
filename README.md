@@ -30,9 +30,13 @@ Home Screen for a fullscreen app feel.
   char→evdev map; iOS `beforeinput` is used, so autocorrect noise is
   filtered)
 - ☰ — window switcher: tap a window to focus it
-- 🖥 — window view mode: a live MJPEG stream of the focused window
-  (damage-driven wlr-screencopy: ~11 fps when the window is active, idle
-  throttled to output damage; grim remains as a fallback path).
+- 🖥 — window view mode: a live stream of the focused window, delivered
+  ack-clocked over a WebSocket — at most one frame in flight, so a slow
+  link drops frame rate instead of falling behind — with resolution and
+  quality adapting to the measured link (up to 1400px edge when it's fast).
+  Frames come from the compositor's damage-driven window stream, falling
+  back to wlr-screencopy, then grim; `/stream` remains as a curl-friendly
+  MJPEG debug endpoint.
   Tap to click that spot, long-press to right-click; one-finger drag moves
   the pointer exactly like the trackpad (a cyan ring marks the cursor —
   compositor frames carry none), and two fingers pinch-zoom / pan the view

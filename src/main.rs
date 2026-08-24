@@ -27,6 +27,7 @@ use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 mod screencopy;
+mod stream;
 mod winstream;
 
 const INDEX_HTML: &str = include_str!("../index.html");
@@ -460,54 +461,53 @@ fn handle_stream(mut stream: TcpStream, request_head: &str, pin: &str, ip: std::
     {
         return;
     }
-    // Source preference: the compositor's window stream (per-window damage,
-    // follows focus, works off-screen) → screencopy (output damage) → grim.
-    match winstream::stream_mjpeg(&mut stream) {
-        Ok(()) => return, // client disconnected
-        Err(e) => eprintln!("[cce-remote] window stream unavailable ({e}), trying screencopy"),
-    }
-    let rect = || focused_window().map(|(_, x, y, w, h)| (x as i32, y as i32, w as i32, h as i32));
-    match screencopy::stream_mjpeg(&mut stream, rect) {
-        Ok(()) => return, // client disconnected
-        Err(e) => eprintln!("[cce-remote] screencopy stream failed ({e}), falling back to grim"),
-    }
-    let mut win = focused_window();
-    let mut tick = 0u32;
-    loop {
-        if tick % 4 == 0 {
-            if let Some(w) = focused_window() {
-                win = Some(w);
-            }
+    // Source selection (winstream → screencopy → grim) lives in the producer;
+    // this endpoint is the curl-debuggable MJPEG view over the same slot the
+    // page's ack-clocked /wstream uses.
+    let slot = stream::Slot::new();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    stream::spawn_producer(std::sync::Arc::clone(&slot), std::sync::Arc::clone(&stop));
+    stream::run_mjpeg_sender(&mut stream, &slot);
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The page's live view: ack-clocked latest-wins frame delivery over a
+/// dedicated WebSocket. Same first-frame `auth <pin>` gate as the input WS —
+/// and a separate socket on purpose: frames are 30-150KB and input events are
+/// bytes, so sharing one TCP stream would head-of-line-block pointer motion
+/// behind every frame on a slow link.
+fn handle_wstream(stream: TcpStream, pin: &str, ip: std::net::IpAddr, limiter: &RateLimiter) {
+    let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+    let mut ws = match tungstenite::accept(stream) {
+        Ok(ws) => ws,
+        Err(e) => {
+            eprintln!("[cce-remote] wstream handshake failed ({peer}): {e}");
+            return;
         }
-        tick = tick.wrapping_add(1);
-        let Some((_, x, y, w, h)) = win else {
-            std::thread::sleep(Duration::from_millis(400));
-            continue;
-        };
-        let out = std::process::Command::new("grim")
-            .args([
-                "-g",
-                &format!("{},{} {}x{}", x as i32, y as i32, w as i32, h as i32),
-                "-t", "jpeg", "-q", "65", "-s", "0.5", "-",
-            ])
-            .output();
-        match out {
-            Ok(o) if o.status.success() && o.stdout.starts_with(&[0xff, 0xd8]) => {
-                let part = format!(
-                    "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
-                    o.stdout.len()
-                );
-                if stream.write_all(part.as_bytes()).is_err()
-                    || stream.write_all(&o.stdout).is_err()
-                    || stream.write_all(b"\r\n").is_err()
-                {
-                    return; // client gone — the loop (and grim spawning) stops
-                }
-            }
-            _ => std::thread::sleep(Duration::from_millis(400)),
-        }
-        std::thread::sleep(Duration::from_millis(40));
+    };
+    if !limiter.allow(ip, std::time::Instant::now()) {
+        let _ = ws.close(None);
+        return;
     }
+    let authed = matches!(
+        ws.read(),
+        Ok(tungstenite::Message::Text(t)) if auth_frame_ok(&t, pin)
+    );
+    if !authed {
+        limiter.record_failure(ip, std::time::Instant::now());
+        eprintln!("[cce-remote] wstream auth failed: {peer}");
+        let _ = ws.close(None);
+        return;
+    }
+    limiter.record_success(ip);
+    let _ = ws.send(tungstenite::Message::Text("auth ok".into()));
+    let slot = stream::Slot::new();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    stream::spawn_producer(std::sync::Arc::clone(&slot), std::sync::Arc::clone(&stop));
+    stream::run_ws_sender(&mut ws, &slot);
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = ws.close(None);
 }
 
 fn handle_http(mut stream: TcpStream, request_head: &str, pin: &str, ip: std::net::IpAddr, limiter: &RateLimiter) {
@@ -591,6 +591,9 @@ fn main() {
         // held accountable for its guesses, so it is refused rather than
         // exempted.
         let Ok(ip) = stream.peer_addr().map(|a| a.ip()) else { continue };
+        // Input events and stream acks are tiny and latency-critical; Nagle
+        // would batch them behind delayed ACKs.
+        let _ = stream.set_nodelay(true);
         let pin = pin.clone();
         let limiter = std::sync::Arc::clone(&limiter);
         std::thread::spawn(move || {
@@ -602,7 +605,10 @@ fn main() {
                 _ => return,
             };
             let head = String::from_utf8_lossy(&buf[..n]).to_string();
-            if head.starts_with("GET /ws") {
+            if head.starts_with("GET /wstream") {
+                // before /ws: "GET /ws" is a prefix of this
+                handle_wstream(stream, &pin, ip, &limiter);
+            } else if head.starts_with("GET /ws") {
                 handle_ws(stream, &pin, ip, &limiter);
             } else {
                 // Consume the request before replying (keeps curl happy).
