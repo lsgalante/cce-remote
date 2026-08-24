@@ -498,6 +498,11 @@ const vv = window.visualViewport;
 function fitViewport() {
   const short = vv && vv.height < window.innerHeight * 0.85;
   document.body.style.height = short ? vv.height + "px" : "";
+  // The keyboard covers the home-indicator area, so the safe-area bottom
+  // padding (~34px in standalone) would hover the click buttons that far
+  // above the keyboard. It exists to dodge the indicator; the keyboard is
+  // dodging it for us.
+  document.body.style.paddingBottom = short ? "0px" : "";
   document.body.style.transform = short && vv.offsetTop > 0
     ? "translateY(" + vv.offsetTop + "px)"
     : "";
