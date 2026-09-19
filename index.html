@@ -32,9 +32,10 @@
   #clicks button:active, #bar button:active { background: #2c5f69; }
   #kb { position: absolute; opacity: 0.02; width: 1px; height: 1px; left: -10px; top: -10px; }
   /* Zoom/pan transform lives on the WRAPPER: getBoundingClientRect then
-     reflects it, so tap mapping stays correct zoomed. (Historically this also
-     dodged an iOS bug where a transformed multipart-MJPEG <img> stopped
-     repainting; the live view is a canvas now, but the structure stays.) */
+     reflects it, so the cursor ring stays correctly placed while zoomed.
+     (Historically this also dodged an iOS bug where a transformed
+     multipart-MJPEG <img> stopped repainting; the live view is a canvas
+     now, but the structure stays.) */
   #screenwrap { display: none; position: absolute; inset: 0; z-index: 2;
                 transform-origin: 0 0; border-radius: 12px; overflow: hidden; }
   #pad.view #screenwrap { display: block; }
@@ -160,8 +161,8 @@ let dragging = false, dragTimer = null, pendDx = 0, pendDy = 0, pendSy = 0, flus
 // ── Window view mode: live view of the focused window. Input is identical
 // to the trackpad — the picture is feedback, not a touchscreen.
 // Frames arrive as JPEG binaries on a dedicated /wstream WebSocket, drawn to
-// the canvas; winRect for tap mapping is kept fresh by polling `wl` over the
-// input WS (the stream follows focus server-side).
+// the canvas; winRect, which places the cursor ring, is kept fresh by polling
+// `wl` over the input WS (the stream follows focus server-side).
 //
 // Delivery is ACK-CLOCKED: after rendering a frame we send "n", and only then
 // does the server send its NEWEST frame. At most one frame is ever in flight,
@@ -215,7 +216,7 @@ function updateRect(wins) {
 }
 // View zoom/pan (two-finger pinch/drag in view mode): a pure client-side
 // transform of the streamed image. Uniform scale+translate means
-// getBoundingClientRect reflects it, so mapToWindow stays correct zoomed.
+// getBoundingClientRect reflects it, so placeMarker stays correct zoomed.
 let vZoom = 1, vPanX = 0, vPanY = 0, pinch = null;
 const screenWrap = document.getElementById("screenwrap");
 function applyViewTransform() {
@@ -230,8 +231,8 @@ function clampPan() {
 }
 
 // The compositor's frames carry no cursor (they're surface textures), so
-// view mode draws its own marker: poll pointer-location over the WS and
-// place the ring via the inverse of the tap mapping.
+// view mode draws its own marker: poll pointer-location over the WS and map
+// that layout position through the contain-fit letterbox onto the canvas.
 const vcursor = document.getElementById("vcursor");
 let ptr = null; // last known pointer position in layout px (from ploc + prediction)
 function placeMarker(lx, ly) {

@@ -218,10 +218,10 @@ Four of its non-obvious constructs are scar tissue. Do not "clean them up":
   empty field, so without something to delete, backspace silently does nothing.
   `beforeinput` is used throughout because iOS `keydown` reports keyCode 229.
 - **The zoom/pan transform lives on `#screenwrap`, not the frame element.** Uniform
-  ancestor transform means `getBoundingClientRect` reflects it, keeping tap mapping
-  correct while zoomed. (It also used to dodge an iOS bug where a transformed
-  multipart-MJPEG `<img>` stopped repainting; the view is a `<canvas>` since the
-  2026-08-22 rework, but the structure stays.)
+  ancestor transform means `getBoundingClientRect` reflects it, keeping the cursor
+  ring correctly placed while zoomed. (It also used to dodge an iOS bug where a
+  transformed multipart-MJPEG `<img>` stopped repainting; the view is a `<canvas>`
+  since the 2026-08-22 rework, but the structure stays.)
 - **The `overflow: hidden` clip lives on `#pad`, the non-transformed ancestor.** A clip
   on the transformed element scales with its own content and clips nothing.
 - **The stream self-heals: reconnect on WS close plus a 30s no-frame watchdog** (the
