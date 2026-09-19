@@ -43,14 +43,14 @@ against a literal rather than passing the name through, and that shape is the po
 
 Two things to keep in mind when adding a message:
 
-- **`translate()` is the single chokepoint — keep it that way.** It returns a *list* of
-  commands precisely so the one frame that means two (`tap`/`tapr`: an absolute move
-  then a click) has no reason to live inline at the call site. It used to, along with
-  `wl`/`pl`, and that inline branch was just as reachable from the network while being
-  untestable without a live socket. The only frames still handled in `handle_ws` are
-  `wl` and `pl`, which produce a *reply* and send fixed commands carrying no
-  caller-supplied content. A new message that carries any part of the frame into a
-  command belongs in `translate()`, where the tests can see it.
+- **`translate()` is the single chokepoint — keep it that way.** It returns a *list*
+  of commands so a verb can expand to several without the expansion living inline at
+  the call site (the retired view-tap did: absolute move, then click — view-mode taps
+  are plain trackpad clicks since 2026-08-23, and the verbs left the whitelist rather
+  than lingering as unused injection surface). The only frames still handled in
+  `handle_ws` are `wl` and `pl`, which produce a *reply* and send fixed commands
+  carrying no caller-supplied content. A new message that carries any part of the
+  frame into a command belongs in `translate()`, where the tests can see it.
 - **`cmd restart-compositor` restarts the user's whole session** from a phone, behind
   nothing but a client-side `confirm()`. Compositor-side it writes
   `/tmp/cce-restart-requested-$USER` and exits cleanly (state is saved, and
@@ -199,9 +199,11 @@ rects from `windows --json` are in layout coordinates. Those are the same number
 because there is a single output sitting at the origin — true for this DE's eDP-1 setup,
 and the same assumption `grim` ran under. Multi-output would need a real mapping here.
 
-Tap mapping (`mapToWindow`) goes the other way, through the `object-fit: contain`
-letterbox, and stays correct under pinch-zoom only because the zoom is a **uniform**
-CSS transform on an ancestor, so `getBoundingClientRect()` already reflects it.
+The cursor marker (`placeMarker`) maps the other way, through the `object-fit:
+contain` letterbox, and stays correct under pinch-zoom only because the zoom is a
+**uniform** CSS transform on an ancestor, so `getBoundingClientRect()` already
+reflects it. (Tap-to-spot mapping is gone: view-mode input is trackpad-identical —
+taps click where the cursor is.)
 
 ## `index.html` is the client, and iOS Safari shaped most of it
 
@@ -238,17 +240,15 @@ The awkward part: **there is no WebSocket client on this machine** (no `websocat
 be driven from a real phone, or by writing a throwaway client.
 
 The pure functions are the exception, and they are where the crate's invariants are
-actually enforced, so they carry all the tests (`cargo test -p cce-remote`, 26 of them,
+actually enforced, so they carry all the tests (`cargo test -p cce-remote`, 25 of them,
 in `main.rs`) — `translate()` for what a paired client may say, and the three PIN gates
 for who is paired at all. They cover the accepted shapes and — more to the point —
 everything that
 must be refused: unknown verbs *including the compositor's own command names*,
 malformed and missing arguments, `wf` targets outside `safe_token`, unwhitelisted `cmd`
 names, and the property that no input can make the output span two lines (an embedded
-newline would be a second command, since `control_command` appends one). A partial tap
-must emit **nothing** — not a bare move, and above all not a click at whatever position
-the pointer already had. Extend them when you touch the whitelist; they are much
-cheaper than the phone.
+newline would be a second command, since `control_command` appends one). Extend them
+when you touch the whitelist; they are much cheaper than the phone.
 
 One of them, `non_finite_coordinates_are_dropped`, guards a hole that was live until
 2026-08-22: `f64::from_str` accepts `"NaN"`/`"inf"` and `{:.2}` prints them straight back,

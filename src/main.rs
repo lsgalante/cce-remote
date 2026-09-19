@@ -260,9 +260,10 @@ fn finite(v: f64) -> Option<f64> {
 /// Translate one WS frame into the control-socket commands it means. Returns
 /// None for frames that don't parse — they're dropped, never forwarded raw
 /// (the WS payload is untrusted; only these fixed shapes reach the
-/// compositor). A list rather than one command because a window-view tap is
-/// one frame and two commands; keeping that here rather than inline at the
-/// call site is what makes this the single place input is validated.
+/// compositor). A list rather than one command so a verb can expand to
+/// several commands without the expansion living inline at the call site (the
+/// retired view-mode tap did: absolute move, then click); keeping every
+/// expansion here is what makes this the single place input is validated.
 fn translate(frame: &str) -> Option<Vec<String>> {
     let mut it = frame.split_ascii_whitespace();
     let cmd = match it.next()? {
@@ -297,17 +298,6 @@ fn translate(frame: &str) -> Option<Vec<String>> {
                 return None;
             }
             format!("focus-window {target}")
-        }
-        // Window-view tap: absolute move, then click. The one frame that means
-        // two commands — hence the Vec return.
-        verb @ ("tap" | "tapr") => {
-            let btn = if verb == "tapr" { "right" } else { "left" };
-            let x = finite(it.next()?.parse().ok()?)?;
-            let y = finite(it.next()?.parse().ok()?)?;
-            return Some(vec![
-                format!("pointer-move-to {x:.1} {y:.1}"),
-                format!("pointer-click {btn}"),
-            ]);
         }
         // Named commands, individually whitelisted — never pass-through.
         "cmd" => match it.next()? {
@@ -901,6 +891,10 @@ mod tests {
         for frame in [
             "", "   ", "x 1", "exit", "spawn foot", "reload",
             "pointer-click left", "keypress 28", "restart-compositor",
+            // retired 2026-08-23: view-mode taps are plain trackpad clicks,
+            // so the verbs left the whitelist rather than lingering as
+            // unused injection surface
+            "tap 100 200", "tapr 5 5",
         ] {
             assert!(translate(frame).is_none(), "{frame:?} should be dropped");
         }
@@ -915,7 +909,6 @@ mod tests {
             "kd", "ku",
             "b", "b left", "b left bogus", "b sideways click", "b LEFT click",
             "wf", "cmd",
-            "tap", "tapr", "tap 1", "tapr 1", "tap a b", "tap 1 b",
         ] {
             assert!(translate(frame).is_none(), "{frame:?} should be dropped");
         }
@@ -933,7 +926,6 @@ mod tests {
         for frame in [
             "m NaN 1", "m 1 NaN", "m inf 0", "m -inf 0", "m 1 infinity",
             "s NaN", "s 1 inf", "s nan 0",
-            "tap NaN 1", "tap 1 inf", "tapr -inf 0", "tapr 1 nan",
         ] {
             assert!(translate(frame).is_none(), "{frame:?} should be dropped");
         }
@@ -966,35 +958,6 @@ mod tests {
     }
 
     #[test]
-    fn a_tap_is_one_frame_and_two_commands() {
-        // The window-view tap: move the pointer somewhere absolute, then click
-        // it. Both commands, in that order — a click without the move lands
-        // wherever the pointer happened to be.
-        assert_eq!(
-            translate("tap 100 200.5").unwrap(),
-            ["pointer-move-to 100.0 200.5", "pointer-click left"]
-        );
-        assert_eq!(
-            translate("tapr 0 0").unwrap(),
-            ["pointer-move-to 0.0 0.0", "pointer-click right"]
-        );
-        // Negative coords are legal: the layout origin is not the only anchor.
-        assert_eq!(
-            translate("tap -5.25 -0.04").unwrap(),
-            ["pointer-move-to -5.2 -0.0", "pointer-click left"]
-        );
-        // Trailing junk is discarded, exactly as for the one-command verbs.
-        assert_eq!(
-            translate("tap 1 2 pointer-press left").unwrap(),
-            ["pointer-move-to 1.0 2.0", "pointer-click left"]
-        );
-        // A partial tap must emit NOTHING — not a bare move, and above all not
-        // a click at whatever position the pointer already had.
-        assert!(translate("tap 1").is_none());
-        assert!(translate("tap").is_none());
-    }
-
-    #[test]
     fn a_newline_can_never_smuggle_a_second_command() {
         // control_command() appends "\n", so an embedded newline in the output
         // would be a second command on the socket. split_ascii_whitespace()
@@ -1009,6 +972,7 @@ mod tests {
             "m 1 2\nexit", "m 1\n2", "s 1\nexit", "b left\nclick", "b left click\nexit",
             "k 28\nexit", "kd 42\nexit", "ku 42\nexit", "wf 1\nexit",
             "cmd restart-compositor\nexit", "m\t1\t2", "wf\n12", "  m   1   2  ",
+            "tap 1 2\nexit",
         ] {
             for out in translate(frame).unwrap_or_default() {
                 assert!(!out.contains('\n'), "{frame:?} produced a multi-line command: {out:?}");

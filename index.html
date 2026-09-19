@@ -157,7 +157,8 @@ const ACCEL = 1.6, SCROLL = 0.8;
 let touches = new Map(), moved = 0, startT = 0, maxFingers = 0, startX = 0, startY = 0;
 let dragging = false, dragTimer = null, pendDx = 0, pendDy = 0, pendSy = 0, flushT = null;
 
-// ── Window view mode: live view of the focused window; taps click it.
+// ── Window view mode: live view of the focused window. Input is identical
+// to the trackpad — the picture is feedback, not a touchscreen.
 // Frames arrive as JPEG binaries on a dedicated /wstream WebSocket, drawn to
 // the canvas; winRect for tap mapping is kept fresh by polling `wl` over the
 // input WS (the stream follows focus server-side).
@@ -261,19 +262,6 @@ function predictMarker(dLx, dLy) {
   placeMarker(ptr.x, ptr.y);
 }
 
-// touch point (viewport px) → layout px inside the focused window,
-// accounting for the contain-fit letterbox. null when off the image.
-function mapToWindow(cx, cy) {
-  if (!winRect || !screenEl.width) return null;
-  const box = screenEl.getBoundingClientRect();
-  const scale = Math.min(box.width / screenEl.width, box.height / screenEl.height);
-  const dw = screenEl.width * scale, dh = screenEl.height * scale;
-  const ox = box.left + (box.width - dw) / 2, oy = box.top + (box.height - dh) / 2;
-  const u = (cx - ox) / dw, v = (cy - oy) / dh;
-  if (u < 0 || u > 1 || v < 0 || v > 1) return null;
-  return [(winRect.x + u * winRect.w).toFixed(1), (winRect.y + v * winRect.h).toFixed(1)];
-}
-
 function flush() {
   flushT = null;
   if (pendDx || pendDy) { send("m " + (pendDx * ACCEL).toFixed(1) + " " + (pendDy * ACCEL).toFixed(1)); pendDx = pendDy = 0; }
@@ -295,13 +283,7 @@ pad.addEventListener("touchstart", e => {
     startX = t0.clientX; startY = t0.clientY;
     dragTimer = setTimeout(() => {
       if (moved >= 8) return;
-      if (viewMode) {
-        // long-press in view mode = right click at the spot
-        const m = mapToWindow(startX, startY);
-        if (m) { send("tapr " + m[0] + " " + m[1]); navigator.vibrate && navigator.vibrate(15); }
-      } else {
-        dragging = true; send("b left down"); navigator.vibrate && navigator.vibrate(15);
-      }
+      dragging = true; send("b left down"); navigator.vibrate && navigator.vibrate(15);
     }, 350);
   } else { clearTimeout(dragTimer); }
 }, { passive: false });
@@ -364,15 +346,10 @@ pad.addEventListener("touchend", e => {
   flush();
   if (dragging) { send("b left up"); dragging = false; }
   else if (moved < 10 && Date.now() - startT < 300) {
-    if (viewMode) {
-      if (maxFingers < 2) {
-        const t = e.changedTouches[0];
-        const m = mapToWindow(t.clientX, t.clientY);
-        if (m) send("tap " + m[0] + " " + m[1]);
-      }
-    } else {
-      send(maxFingers >= 2 ? "b right click" : "b left click");
-    }
+    // Identical in both modes: a tap clicks where the cursor IS — it never
+    // warps the pointer to the tapped spot. View mode is the trackpad with a
+    // picture behind it, not a touchscreen.
+    send(maxFingers >= 2 ? "b right click" : "b left click");
   }
   maxFingers = 0;
 }, { passive: false });

@@ -37,10 +37,11 @@ Home Screen for a fullscreen app feel.
   Frames come from the compositor's damage-driven window stream, falling
   back to wlr-screencopy, then grim; `/stream` remains as a curl-friendly
   MJPEG debug endpoint.
-  Tap to click that spot, long-press to right-click; one-finger drag moves
-  the pointer exactly like the trackpad (a cyan ring marks the cursor —
-  compositor frames carry none), and two fingers pinch-zoom / pan the view
-  itself. Toggle again for the trackpad. Both `/stream` and the one-shot
+  Input is identical to the trackpad — tap = click, two-finger tap = right
+  click, press-and-hold = held drag, one-finger drag = pointer motion (a
+  cyan ring marks the cursor — compositor frames carry none); taps never
+  warp the pointer. Two fingers pinch-zoom / pan the view itself. Toggle
+  again for the trackpad. Both `/stream` and the one-shot
   `/shot` endpoint are PIN-gated; nothing accumulates on disk.
 
 ## Security
