@@ -63,9 +63,11 @@ A persistent 6-digit PIN (`~/.config/cce/cce-remote.pin`, 0600, generated from
 `/dev/urandom` on first run, honoring `XDG_CONFIG_HOME`) must arrive as the **first**
 WebSocket frame or the connection closes — with a 10s read timeout so unauthenticated
 peers can't sit on a socket. The HTTP frame endpoints are gated separately, and
-differently, because of a browser constraint: `/shot` takes an `X-Pin` header (the page
-`fetch()`es it), but `/stream` accepts `?pin=` in the query string, because an
-`<img src>` cannot carry headers.
+differently, because of a browser constraint that shaped them when the page still
+used both: `/shot` takes an `X-Pin` header, but `/stream` accepts `?pin=` in the query
+string, because an `<img src>` cannot carry headers. The page uses NEITHER today — the
+live view rides `/wstream` — so both are debug endpoints now, and the split survives
+for the curl recipes below rather than for a browser.
 
 All three gates are pure functions — `auth_frame_ok`, `header_pin_ok`, `query_pin_ok`,
 all over `pin_matches` — so they are unit-tested rather than only reachable through a
@@ -142,9 +144,13 @@ The delivery design (`stream.rs`) makes that failure structurally impossible:
   `drawImage`, not on receipt — so the measured send→ack time covers network + decode +
   paint, which is what the user experiences.
 - That measurement drives an **adaptation ladder** (`LADDER`/`adapt()`): resolution up
-  to 1400px edge when the link is fast, quality degrading before size on the way down,
-  downgrades immediate, upgrades requiring sustained headroom. Encoding happens per
-  *sent* frame at the chosen level.
+  to 1400px edge when the link is fast, downgrades immediate, upgrades requiring
+  sustained headroom. Encoding happens per *sent* frame at the chosen level. The ladder
+  alternates rather than sacrificing one axis first — `(1400,68) → (1120,68) →
+  (1120,55) → (840,58) → (840,46) → (560,48)`, a size drop first, and quality rising
+  again where size falls. `ladder_prefers_resolution_over_quality` does NOT assert the
+  preference its name claims: it only checks that the edge never increases, which a
+  ladder that dropped size at every step would also satisfy.
 - `/wstream` is deliberately a **separate socket from the input WS**: frames are
   30-150KB and input events are bytes; one TCP stream would head-of-line-block pointer
   motion behind every frame.
@@ -240,9 +246,10 @@ The awkward part: **there is no WebSocket client on this machine** (no `websocat
 be driven from a real phone, or by writing a throwaway client.
 
 The pure functions are the exception, and they are where the crate's invariants are
-actually enforced, so they carry all the tests (`cargo test -p cce-remote`, 25 of them,
-in `main.rs`) — `translate()` for what a paired client may say, and the three PIN gates
-for who is paired at all. They cover the accepted shapes and — more to the point —
+actually enforced, so they carry all the tests (`cargo test -p cce-remote`, 25 of them:
+19 in `main.rs`, 6 in `stream.rs`) — `translate()` for what a paired client may say, the
+three PIN gates for who is paired at all, and in `stream.rs` the `Slot`'s latest-wins
+semantics plus `adapt()`/`LADDER`. They cover the accepted shapes and — more to the point —
 everything that
 must be refused: unknown verbs *including the compositor's own command names*,
 malformed and missing arguments, `wf` targets outside `safe_token`, unwhitelisted `cmd`
@@ -265,8 +272,9 @@ curl -D- -o /tmp/shot.png -H "X-Pin: $(cat ~/.config/cce/cce-remote.pin)" \
 ```
 
 `X-Win: <id> <x> <y> <w> <h>` in that reply is the focused window's layout rect — the
-same numbers the page maps taps through, so it is the quickest check that focus
-resolution and geometry agree.
+same rect the frame sources capture and the page places its cursor ring inside, so it
+is the quickest check that focus resolution and geometry agree. (The page does not read
+this header; nothing in the page fetches `/shot` at all.)
 
 **Injected input lands in the live session** — pointer moves steer the user's real
 cursor and keystrokes go into whatever they have focused. To exercise the input path
@@ -280,10 +288,28 @@ startup, so a server is bound to whichever session launched it for its whole lif
 ## Build and lifecycle
 
 `make install` → `ccebuild install --no-build cce-remote`. Never hand-list binaries in
-the Makefile — `cargo metadata` already knows them. This directory is its own git
-repository with a fetch-only origin; committing locally is publishing, via gitsite
-(it is listed in `repos.conf`). No `Cargo.lock` is tracked here, so dependency changes
-need no lockfile refresh.
+the Makefile — `cargo metadata` already knows them. No `Cargo.lock` is tracked here, so
+dependency changes need no lockfile refresh.
+
+**Committing is not publishing — pushing is.** This directory is its own git repository
+whose `origin` is the local *bare* repo `~/git/cce-remote.git` (a real, pushable
+remote). `published` is the old fetch-only static mirror
+`https://git.lucas.co/cce-remote.git`, kept for reference; it never accepted a push
+(dumb HTTP, no receive-pack) and that is exactly why the bare layer exists — see
+`~/.local/bin/git-bare-sync.sh`. `repos.conf` lists the **bare** path, and
+`gitsite.timer` republishes when a listed bare repo's HEAD moves. So the chain is:
+
+```sh
+git commit ...                 # local only
+git push origin master         # this is the publishing step
+                               # gitsite.timer then mirrors it to git.lucas.co
+```
+
+An unpushed commit looks published on this machine and is not on the site. (As of
+2026-09-18 that gap was workspace-wide: 21 crates held unpushed commits, because
+`git-bare-sync.sh` — which does the pushing in bulk — reads `repos.conf` field 2, and
+that field now holds the bare path rather than the work tree, so every listed repo is
+skipped as "not a git work tree".)
 
 **The server does not run in the foreground — it is a user service.** `cce-remote.service`
 ships from this crate root and is installed by `ccebuild` (classified as a user unit by

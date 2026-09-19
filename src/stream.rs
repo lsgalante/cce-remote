@@ -106,9 +106,10 @@ fn encode(p: &Payload, max_edge: u32, quality: u8) -> Result<Vec<u8>, String> {
 
 // ---- adaptation ------------------------------------------------------------
 
-/// (max_edge px, jpeg quality), best first. Resolution is held as long as
-/// possible — quality drops before size does — because the point of the live
-/// view is READING the window.
+/// (max_edge px, jpeg quality), best first. The point of the live view is
+/// READING the window, so the ladder gives up size grudgingly: it alternates
+/// size and quality steps and lets quality RISE where size falls (840,58 after
+/// 1120,55), rather than exhausting one axis before touching the other.
 pub const LADDER: &[(u32, u8)] = &[
     (1400, 68),
     (1120, 68),

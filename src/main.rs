@@ -440,12 +440,12 @@ fn handle_ws(stream: TcpStream, pin: &str, ip: std::net::IpAddr, limiter: &RateL
     println!("[cce-remote] client disconnected: {peer}");
 }
 
-/// MJPEG stream of the focused window: multipart/x-mixed-replace with one
-/// JPEG part per grim capture (region = the focused window's layout rect,
-/// re-resolved every few frames so the stream follows focus). ~3 fps for a
-/// full-size window — the screencopy dominates, not the encode. Runs until
-/// the client closes the socket. PIN via X-Pin header or ?pin= query (an
-/// <img src> can't carry headers).
+/// MJPEG stream of the focused window: multipart/x-mixed-replace, one JPEG
+/// part per frame taken from the same latest-wins slot `/wstream` uses (the
+/// producer picks the source and follows focus). Fixed 560/q60, no acks — the
+/// curl-debuggable endpoint, not the page's path. Runs until the client closes
+/// the socket. PIN via X-Pin header or ?pin= query (an <img src> can't carry
+/// headers).
 fn handle_stream(mut stream: TcpStream, request_head: &str, pin: &str, ip: std::net::IpAddr, limiter: &RateLimiter) {
     if !limiter.allow(ip, std::time::Instant::now()) {
         let _ = write!(stream, "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 30\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
@@ -522,15 +522,17 @@ fn handle_http(mut stream: TcpStream, request_head: &str, pin: &str, ip: std::ne
         handle_stream(stream, request_head, pin, ip, limiter);
         return;
     }
-    // /shot: the focused window's screenshot, PIN-gated via the X-Pin header
-    // (the page fetch()es it — an <img src> couldn't carry a header).
+    // /shot: the focused window's screenshot, PIN-gated via the X-Pin header.
+    // A debug endpoint now — the page's live view rides /wstream and nothing
+    // in the page fetches this.
     if request_head.starts_with("GET /shot") {
         if !limiter.allow(ip, std::time::Instant::now()) {
             let _ = write!(stream, "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 30\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
             return;
         }
-        // Header only: the page fetch()es this one, so unlike /stream there is
-        // no reason to let the PIN travel in a URL (where it lands in logs).
+        // Header only: nothing loads this as an <img src>, so unlike /stream
+        // there is no reason to let the PIN travel in a URL (where it lands in
+        // logs).
         if !header_pin_ok(request_head, pin) {
             limiter.record_failure(ip, std::time::Instant::now());
             let _ = write!(stream, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
