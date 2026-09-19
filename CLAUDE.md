@@ -305,11 +305,12 @@ git push origin master         # this is the publishing step
                                # gitsite.timer then mirrors it to git.lucas.co
 ```
 
-An unpushed commit looks published on this machine and is not on the site. (As of
-2026-09-18 that gap was workspace-wide: 21 crates held unpushed commits, because
-`git-bare-sync.sh` — which does the pushing in bulk — reads `repos.conf` field 2, and
-that field now holds the bare path rather than the work tree, so every listed repo is
-skipped as "not a git work tree".)
+An unpushed commit looks published on this machine and is not on the site. That gap was
+workspace-wide on 2026-09-18 — 21 crates held unpushed commits, because
+`git-bare-sync.sh` (the bulk pusher) read `repos.conf` field 2 as a work tree when it
+holds the bare path, and silently skipped every repo. It is fixed and now versioned in
+the gitsite repo, so `git-bare-sync.sh` pushes the whole set in one go; the backlog
+stands until someone runs it.
 
 **The server does not run in the foreground — it is a user service.** `cce-remote.service`
 ships from this crate root and is installed by `ccebuild` (classified as a user unit by
