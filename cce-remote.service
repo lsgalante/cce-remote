@@ -5,7 +5,9 @@ After=cce-session.target
 
 [Service]
 Type=simple
-# No args = serve on 0.0.0.0:17017 (a single argument overrides the port).
+# No args = serve loopback and the tailnet on :17017; a numeric argument
+# overrides the port, and --lan (or Environment=CCE_REMOTE_LAN=1) serves every
+# interface in plain HTTP.
 # The server bridges WebSocket input from the phone page into the compositor
 # control socket at /tmp/cce-{WAYLAND_DISPLAY}.sock, so it must run inside the
 # session whose display it should drive: WAYLAND_DISPLAY is read from the

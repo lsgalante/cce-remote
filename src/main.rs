@@ -1,7 +1,7 @@
 //! cce-remote — use a phone as a trackpad + keyboard for the cce desktop.
 //!
 //! One small server, no GUI: it serves the embedded `index.html` (a touch
-//! trackpad + keyboard page) over HTTP on the LAN, accepts a WebSocket at
+//! trackpad + keyboard page) over HTTP on the tailnet (see `reachable`), accepts a WebSocket at
 //! `/ws`, and translates the page's compact input events into the
 //! compositor's line-oriented control socket (`/tmp/cce-{WAYLAND_DISPLAY}.sock`
 //! — the same channel `ccectl` uses, so injection goes through the real
@@ -164,6 +164,37 @@ fn query_pin_ok(request_head: &str, pin: &str) -> bool {
         })
 }
 
+/// Loopback, or an address Tailscale hands out: 100.64.0.0/10 and
+/// fd7a:115c:a1e0::/48.
+fn tailnet_or_loopback(ip: std::net::IpAddr) -> bool {
+    match ip.to_canonical() {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_loopback() || (o[0] == 100 && (o[1] & 0xc0) == 64)
+        }
+        std::net::IpAddr::V6(v6) => {
+            let s = v6.segments();
+            v6.is_loopback() || (s[0] == 0xfd7a && s[1] == 0x115c && s[2] == 0xa1e0)
+        }
+    }
+}
+
+/// Whether a connection may be served at all, before any PIN is asked for.
+///
+/// The PIN crosses the wire in clear — HTTP, a WS frame, a `/stream` URL — so
+/// on a network someone else can watch, anyone there who sees one pairing
+/// owns the keyboard. By default, then, only the tailnet is served: WireGuard
+/// carries it encrypted end to end, and loopback never leaves the machine.
+/// Both ends are checked. The PEER must be a tailnet (or loopback) address,
+/// and so must the LOCAL address it reached: Linux will accept a packet for
+/// the tailnet address arriving on the Wi-Fi interface, and a LAN peer
+/// spoofing a 100.x source cannot finish the handshake, since the reply is
+/// routed into the tunnel. `lan` (`--lan` / `CCE_REMOTE_LAN=1`) serves every
+/// interface, the old behaviour, for a network you trust.
+fn reachable(peer: std::net::IpAddr, local: std::net::IpAddr, lan: bool) -> bool {
+    lan || (tailnet_or_loopback(peer) && tailnet_or_loopback(local))
+}
+
 /// Failed PIN attempts allowed back-to-back from one peer before it must wait.
 /// Sized for a human mistyping a PIN, not for a client retry loop.
 const PIN_ATTEMPT_BURST: f64 = 5.0;
@@ -174,6 +205,14 @@ const PIN_ATTEMPT_REFILL_PER_SEC: f64 = 1.0 / 30.0;
 /// Backstop on the tracking table so the limiter cannot itself be turned into
 /// a memory-exhaustion vector by cycling source addresses.
 const PIN_MAX_TRACKED_PEERS: usize = 4096;
+/// Failed attempts allowed back-to-back across ALL peers. The per-peer budget
+/// alone is per address, and anyone who can claim many addresses (a /22 LAN
+/// has a thousand) gets a budget for each — which brought walking the PIN
+/// space down from a year to hours. Room for a few devices mistyping at once.
+const PIN_GLOBAL_BURST: f64 = 20.0;
+/// What every peer together recovers: the same one per 30s a single peer
+/// does, so the year-long walk holds however many addresses do the guessing.
+const PIN_GLOBAL_REFILL_PER_SEC: f64 = 1.0 / 30.0;
 
 #[derive(Clone, Copy, Debug)]
 struct Bucket {
@@ -191,26 +230,52 @@ struct Bucket {
 ///
 /// `now` is a parameter rather than read inside, so the behavior is testable
 /// without sleeping.
+///
+/// Behind the per-peer buckets sits one GLOBAL bucket every failure also
+/// drains, so guessing from many addresses buys no more attempts than
+/// guessing from one. The price: whoever drains it locks out everyone,
+/// a paired phone included, until it refills. That is the trade — a denial
+/// of a trackpad for a while, against keyboard control of the desktop — and
+/// with the default reach (loopback and the tailnet, see `reachable`) only
+/// your own devices can drain it.
 struct RateLimiter {
     peers: std::sync::Mutex<std::collections::HashMap<std::net::IpAddr, Bucket>>,
+    global: std::sync::Mutex<Bucket>,
 }
 
 impl RateLimiter {
     fn new() -> Self {
-        Self { peers: std::sync::Mutex::new(std::collections::HashMap::new()) }
+        Self {
+            peers: std::sync::Mutex::new(std::collections::HashMap::new()),
+            global: std::sync::Mutex::new(Bucket {
+                tokens: PIN_GLOBAL_BURST,
+                last: std::time::Instant::now(),
+            }),
+        }
     }
 
     fn refilled(bucket: Bucket, now: std::time::Instant) -> Bucket {
+        Self::refilled_at(bucket, now, PIN_ATTEMPT_REFILL_PER_SEC, PIN_ATTEMPT_BURST)
+    }
+
+    fn refilled_at(bucket: Bucket, now: std::time::Instant, rate: f64, burst: f64) -> Bucket {
         let elapsed = now.saturating_duration_since(bucket.last).as_secs_f64();
         Bucket {
-            tokens: (bucket.tokens + elapsed * PIN_ATTEMPT_REFILL_PER_SEC).min(PIN_ATTEMPT_BURST),
+            tokens: (bucket.tokens + elapsed * rate).min(burst),
             last: now,
         }
+    }
+
+    fn global_refilled(bucket: Bucket, now: std::time::Instant) -> Bucket {
+        Self::refilled_at(bucket, now, PIN_GLOBAL_REFILL_PER_SEC, PIN_GLOBAL_BURST)
     }
 
     /// May this peer attempt a PIN right now? Does not consume anything —
     /// a correct PIN costs nothing.
     fn allow(&self, ip: std::net::IpAddr, now: std::time::Instant) -> bool {
+        if Self::global_refilled(*self.global.lock().unwrap(), now).tokens < 1.0 {
+            return false;
+        }
         let peers = self.peers.lock().unwrap();
         match peers.get(&ip) {
             Some(&b) => Self::refilled(b, now).tokens >= 1.0,
@@ -218,8 +283,14 @@ impl RateLimiter {
         }
     }
 
-    /// Charge this peer for a wrong PIN.
+    /// Charge this peer — and the global budget — for a wrong PIN.
     fn record_failure(&self, ip: std::net::IpAddr, now: std::time::Instant) {
+        {
+            let mut g = self.global.lock().unwrap();
+            let mut b = Self::global_refilled(*g, now);
+            b.tokens = (b.tokens - 1.0).max(0.0);
+            *g = b;
+        }
         let mut peers = self.peers.lock().unwrap();
         // A fully refilled bucket is indistinguishable from an absent one, so
         // dropping those keeps the table proportional to peers currently being
@@ -570,10 +641,18 @@ fn handle_http(mut stream: TcpStream, request_head: &str, pin: &str, ip: std::ne
 }
 
 fn main() {
-    let port = std::env::args()
-        .nth(1)
-        .and_then(|a| a.parse::<u16>().ok())
-        .unwrap_or(DEFAULT_PORT);
+    let mut port = DEFAULT_PORT;
+    let mut lan = std::env::var("CCE_REMOTE_LAN").is_ok_and(|v| v == "1");
+    for arg in std::env::args().skip(1) {
+        if arg == "--lan" {
+            lan = true;
+        } else if let Ok(p) = arg.parse::<u16>() {
+            port = p;
+        } else {
+            eprintln!("[cce-remote] usage: cce-remote [--lan] [port]");
+            std::process::exit(2);
+        }
+    }
     let pin = match load_or_create_pin() {
         Ok(p) => p,
         Err(e) => {
@@ -589,7 +668,12 @@ fn main() {
         }
     };
     let limiter = std::sync::Arc::new(RateLimiter::new());
-    println!("[cce-remote] serving on http://0.0.0.0:{port} (control socket: {})", control_socket_path());
+    if lan {
+        println!("[cce-remote] serving EVERY interface on :{port} (--lan: the PIN crosses the network in clear)");
+    } else {
+        println!("[cce-remote] serving loopback and the tailnet on :{port} (--lan or CCE_REMOTE_LAN=1 for every interface)");
+    }
+    println!("[cce-remote] control socket: {}", control_socket_path());
     println!("[cce-remote] pairing PIN: {pin}   (stored in {:?})", pin_path());
 
     for stream in listener.incoming() {
@@ -602,6 +686,26 @@ fn main() {
         // held accountable for its guesses, so it is refused rather than
         // exempted.
         let Ok(ip) = stream.peer_addr().map(|a| a.ip()) else { continue };
+        let Ok(local) = stream.local_addr().map(|a| a.ip()) else { continue };
+        if !reachable(ip, local, lan) {
+            // Say why rather than just dropping it, so a phone still holding
+            // the old LAN address learns where to go; nothing past this line
+            // is reachable from here, the request is never parsed.
+            eprintln!("[cce-remote] refused {ip} -> {local}: not the tailnet (--lan to serve it)");
+            std::thread::spawn(move || {
+                let mut s = stream;
+                let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+                let mut sink = [0u8; 1024];
+                let _ = s.read(&mut sink);
+                let body = "cce-remote serves the tailnet only: open it at this machine's Tailscale address.\n";
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            });
+            continue;
+        }
         // Input events and stream acks are tiny and latency-critical; Nagle
         // would batch them behind delayed ACKs.
         let _ = stream.set_nodelay(true);
@@ -764,6 +868,56 @@ mod tests {
             rl2.peers.get_mut().unwrap().len() <= PIN_MAX_TRACKED_PEERS,
             "table exceeded its cap"
         );
+    }
+
+    #[test]
+    fn many_addresses_share_one_global_budget() {
+        // One failure from each of a LAN's worth of addresses: every per-peer
+        // bucket still has four left, and still the guessing stops.
+        let rl = RateLimiter::new();
+        let t0 = Instant::now();
+        for i in 0..PIN_GLOBAL_BURST as u8 {
+            assert!(rl.allow(ip(i), t0), "global attempt {i} should be allowed");
+            rl.record_failure(ip(i), t0);
+        }
+        assert!(!rl.allow(ip(200), t0), "a fresh address must not bring a fresh budget");
+        // The documented price: a paired phone waits too, then recovers.
+        assert!(!rl.allow(ip(201), t0 + Duration::from_secs(29)));
+        assert!(rl.allow(ip(201), t0 + Duration::from_secs(31)));
+        // A success does not refund the global budget.
+        rl.record_success(ip(0));
+        assert!(!rl.allow(ip(0), t0));
+    }
+
+    #[test]
+    fn only_loopback_and_the_tailnet_are_served_by_default() {
+        let v4 = |a, b, c, d| IpAddr::V4(Ipv4Addr::new(a, b, c, d));
+        let me_ts = v4(100, 105, 214, 102);
+        let me_lan = v4(192, 168, 68, 55);
+        let phone_ts = v4(100, 90, 1, 2);
+        let phone_lan = v4(192, 168, 68, 77);
+        let lo = v4(127, 0, 0, 1);
+
+        assert!(reachable(phone_ts, me_ts, false));
+        assert!(reachable(lo, lo, false));
+        assert!(!reachable(phone_lan, me_lan, false), "the LAN is opt-in");
+        // Linux takes a packet for the tailnet address off the Wi-Fi; the
+        // peer is what gives it away.
+        assert!(!reachable(phone_lan, me_ts, false));
+        // A tailnet-shaped source aimed at the LAN address is not the tunnel.
+        assert!(!reachable(phone_ts, me_lan, false));
+        // Just outside 100.64.0.0/10 on either side.
+        assert!(!reachable(v4(100, 63, 255, 255), me_ts, false));
+        assert!(!reachable(v4(100, 128, 0, 1), me_ts, false));
+        // Tailscale's IPv6 range, and v4 seen through a dual-stack socket.
+        let ts6: IpAddr = "fd7a:115c:a1e0::dd34:d667".parse().unwrap();
+        let other6: IpAddr = "fd7a:115c:a1e1::1".parse().unwrap();
+        assert!(reachable(ts6, ts6, false));
+        assert!(!reachable(other6, ts6, false));
+        let mapped: IpAddr = "::ffff:100.90.1.2".parse().unwrap();
+        assert!(reachable(mapped, me_ts, false));
+
+        assert!(reachable(phone_lan, me_lan, true), "--lan serves everything");
     }
 
     // ---- the pairing PIN ----

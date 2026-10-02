@@ -9,7 +9,7 @@
 viewer for the cce desktop. It is **the odd crate in this workspace**: not a compositor
 and not a Wayland GUI client. It has no `cce-ui` dependency, draws nothing, and opens no
 Wayland surface of its own (it *does* connect to Wayland, but only as a screencopy
-client). It is a headless LAN server — HTTP + WebSocket in, compositor control socket
+client). It is a headless tailnet server (LAN with `--lan`) — HTTP + WebSocket in, compositor control socket
 out — and its entire user interface is one hand-written `index.html` compiled into the
 binary with `include_str!`.
 
@@ -104,13 +104,25 @@ punish a correctly-paired client for someone else's guessing from the same addre
 page reconnects on close and succeeds once the bucket refills. HTTP answers `429` with
 `Retry-After`.
 
+Behind the per-peer buckets is one **global** bucket (20 failures, then one per 30 s)
+that every failure drains, because per-IP limiting alone gave a peer with many
+addresses many budgets — a /22 LAN is a thousand addresses, hours to walk the PIN
+space instead of a year. The price is that whoever drains it locks out a paired phone
+too until it refills; `many_addresses_share_one_global_budget` pins both halves.
+
 Be honest about what is left rather than treating the PIN as security: it still travels
-over **plain HTTP on 0.0.0.0**, is compared non-constant-time, is cached in
-`localStorage`, and for `/stream` it rides in a URL, where it lands in any proxy or
-history that sees it. Limiting is per-IP, so a peer with many addresses gets many
-budgets. It is pairing — it stops other devices on a trusted LAN from steering the
-desktop by accident, and now also stops casual brute force. It is not a defense against
-someone who is on that network on purpose. For a hostile network the answer is a tunnel.
+over **plain HTTP**, is compared non-constant-time, is cached in `localStorage`, and for
+`/stream` it rides in a URL, where it lands in any proxy or history that sees it. On a
+network someone else can watch, one observed pairing is keyboard control of the
+desktop. So since 2026-10-01 the tunnel is the default rather than advice: the listener
+still binds 0.0.0.0, but `reachable()` serves only connections whose peer AND local
+address are loopback or Tailscale's (100.64.0.0/10, fd7a:115c:a1e0::/48); anything else
+gets a 403 before the request is parsed. Both ends, because Linux accepts a packet for
+the tailnet address off the Wi-Fi interface (the peer gives that away), and a LAN peer
+spoofing a 100.x source never sees the SYN-ACK, which routes into the tunnel. Filtering
+rather than binding the tailnet address keeps working when Tailscale comes up after
+this service. `--lan` / `CCE_REMOTE_LAN=1` restores every interface for a trusted
+network.
 
 ## Framing: the control socket is one-shot
 

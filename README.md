@@ -3,7 +3,7 @@
 Use a phone as a trackpad + keyboard for the cce desktop.
 
 A single small server: it serves an embedded web page (touch trackpad +
-keyboard UI) over HTTP on the LAN and bridges the page's WebSocket input
+keyboard UI) over HTTP on your tailnet and bridges the page's WebSocket input
 events into the compositor's control socket — the same channel `ccectl`
 uses, so injection rides the real compositor input path.
 
@@ -11,11 +11,13 @@ uses, so injection rides the real compositor input path.
 
 ```sh
 make install        # installs cce-remote to ~/.local/bin
-cce-remote          # serves on 0.0.0.0:17017 (or: cce-remote <port>)
+cce-remote          # serves loopback + the tailnet on :17017 (or: cce-remote <port>)
+cce-remote --lan    # every interface, plain HTTP (or CCE_REMOTE_LAN=1)
 ```
 
-Open `http://<this-machine's-LAN-IP>:17017` on the phone. Add it to the
-Home Screen for a fullscreen app feel.
+Open `http://<this-machine's-Tailscale-address>:17017` on the phone (its
+100.x address or MagicDNS name). Add it to the Home Screen for a fullscreen
+app feel. A connection from anywhere else gets a 403 saying so.
 
 ## Controls
 
@@ -53,8 +55,14 @@ WebSocket whose first frame isn't `auth <pin>`, so no input can be injected
 without pairing. Delete the PIN file to rotate it.
 
 Wrong PINs are rate-limited per source address — five in a row, then one more
-every 30 seconds (HTTP replies `429 Too Many Requests`) — so the 6-digit space
-can't be walked. Correct PINs cost nothing and a success clears the peer's
-record, so a phone reconnecting its stream is never throttled.
+every 30 seconds (HTTP replies `429 Too Many Requests`) — and globally, twenty
+in a row across every address, then one per 30 seconds, so the 6-digit space
+can't be walked from one address or from many. Correct PINs cost nothing and a
+success clears the peer's record, so a phone reconnecting its stream is never
+throttled — unless someone has drained the global budget, which locks everyone
+out until it refills.
 
-Traffic is plain HTTP on the LAN — for hostile networks, tunnel it.
+Traffic is plain HTTP, so the PIN crosses the wire in clear. That is why only
+loopback and the tailnet (100.64.0.0/10, fd7a:115c:a1e0::/48) are served by
+default: WireGuard encrypts the tailnet end to end. `--lan` serves every
+interface; use it only on a network you trust.
