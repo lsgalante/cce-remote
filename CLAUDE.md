@@ -248,6 +248,15 @@ Four of its non-obvious constructs are scar tissue. Do not "clean them up":
   that connection *paired successfully* — retry-looping a stale PIN would feed the
   rate limiter and lock the phone's address out of the input socket too.
 
+**Every symbol on the page is a cce-icons glyph**, as in every cce app: the arrow,
+windows (`menu`), menu (`more-horizontal`) and keyboard buttons, and the `#status`
+mark (`circle` paired, `circle-outline` disconnected and, dimmed, while connecting).
+The page cannot call cce-ui's `upload_icon`, so each SVG is inlined from
+`../cce-icons/svg/<name>.svg` with its `#ffffff` swapped for `currentColor` (so CSS
+colours it) and a comment naming the file — copy again if a glyph is redrawn. Never
+a symbol character (they were `← ☰ ⋯ ⌨ ● ○ ·` until 2026-10-05); a button with only
+a glyph carries an `aria-label`.
+
 `SCROLL = 0.8`, not the 0.045 it started as: axis values reach clients as surface-px
 deltas, so near-unity is the trackpad-like 1:1 feel. A 300px swipe used to scroll one line.
 

@@ -63,26 +63,38 @@
              background: #191b23; border: 1px solid #2e3140; border-radius: 8px;
              font-size: 15px; color: #cfe8e8; white-space: pre-wrap; word-break: break-all; }
   #preview.show { display: block; }
-  #preview.show::after { content: "▍"; color: #7dffff; animation: blink 1s steps(1) infinite; }
+  /* The echo's caret: a bar, as the DE draws a text caret (a quad), not a
+     block character from whatever face the font falls back to. */
+  #preview.show::after { content: ""; display: inline-block; width: 2px; height: 1.1em;
+                         margin-left: 1px; vertical-align: text-bottom; background: #7dffff;
+                         animation: blink 1s steps(1) infinite; }
   @keyframes blink { 50% { opacity: 0; } }
   #status { position: fixed; top: 4px; right: 10px; font-size: 10px; color: #4a4d5c; }
+  #status svg { display: none; width: 10px; height: 10px; }
+  #status.authed .on, #status.off .off, #status.connecting .off { display: block; }
+  /* Icon buttons draw a cce-icons glyph (inline SVG, white swapped for
+     currentColor) at the text line's height, so the bar keeps its size. */
+  #bar button svg.g { display: block; width: 1.2em; height: 1.2em; margin: 0 auto; }
 </style>
 </head>
 <body>
-<div id="status">·</div>
+<!-- Connection status: circle (paired), circle-outline (disconnected, and
+     dimmed while first connecting). Glyphs from cce-icons/svg/circle.svg and
+     circle-outline.svg, white replaced by currentColor so #status colours them. -->
+<div id="status" class="connecting" aria-label="connecting"><svg class="on" viewBox="0 0 40 40" aria-hidden="true"><circle cx="20" cy="20" r="15" fill="currentColor"/></svg><svg class="off" viewBox="0 0 40 40" aria-hidden="true"><circle cx="20" cy="20" r="12.5" fill="none" stroke="currentColor" stroke-width="5"/></svg></div>
 <div id="bar">
   <button data-k="1">esc</button>
   <button data-k="15">tab</button>
   <button data-mod="29">ctrl</button>
   <button data-mod="56">alt</button>
   <button data-mod="125">sup</button>
-  <button data-k="105">←</button>
-  <button data-k="103">↑</button>
-  <button data-k="108">↓</button>
-  <button data-k="106">→</button>
-  <button id="wbtn">☰</button>
-  <button id="mbtn">⋯</button>
-  <button id="kbtn">⌨</button>
+  <button data-k="105" aria-label="left"><svg class="g" viewBox="0 0 40 40" aria-hidden="true"><!-- cce-icons/svg/arrow-left.svg --><g fill="currentColor" transform="rotate(180 20 20)"><rect x="4" y="17" width="18" height="6" rx="3"/><path d="M22 11 L33 20 L22 29 Z" stroke="currentColor" stroke-width="5" stroke-linejoin="round"/></g></svg></button>
+  <button data-k="103" aria-label="up"><svg class="g" viewBox="0 0 40 40" aria-hidden="true"><!-- cce-icons/svg/arrow-up.svg --><g fill="currentColor" transform="rotate(-90 20 20)"><rect x="4" y="17" width="18" height="6" rx="3"/><path d="M22 11 L33 20 L22 29 Z" stroke="currentColor" stroke-width="5" stroke-linejoin="round"/></g></svg></button>
+  <button data-k="108" aria-label="down"><svg class="g" viewBox="0 0 40 40" aria-hidden="true"><!-- cce-icons/svg/arrow-down.svg --><g fill="currentColor" transform="rotate(90 20 20)"><rect x="4" y="17" width="18" height="6" rx="3"/><path d="M22 11 L33 20 L22 29 Z" stroke="currentColor" stroke-width="5" stroke-linejoin="round"/></g></svg></button>
+  <button data-k="106" aria-label="right"><svg class="g" viewBox="0 0 40 40" aria-hidden="true"><!-- cce-icons/svg/arrow-right.svg --><g fill="currentColor"><rect x="4" y="17" width="18" height="6" rx="3"/><path d="M22 11 L33 20 L22 29 Z" stroke="currentColor" stroke-width="5" stroke-linejoin="round"/></g></svg></button>
+  <button id="wbtn" aria-label="windows"><svg class="g" viewBox="0 0 40 40" aria-hidden="true"><!-- cce-icons/svg/menu.svg --><g fill="currentColor"><rect x="4" y="7.5" width="32" height="6" rx="3"/><rect x="4" y="17" width="32" height="6" rx="3"/><rect x="4" y="26.5" width="32" height="6" rx="3"/></g></svg></button>
+  <button id="mbtn" aria-label="menu"><svg class="g" viewBox="0 0 40 40" aria-hidden="true"><!-- cce-icons/svg/more-horizontal.svg --><g fill="currentColor"><circle cx="8" cy="20" r="3.5"/><circle cx="20" cy="20" r="3.5"/><circle cx="32" cy="20" r="3.5"/></g></svg></button>
+  <button id="kbtn" aria-label="keyboard"><svg class="g" viewBox="0 0 40 40" aria-hidden="true"><!-- cce-icons/svg/keyboard.svg --><path fill="currentColor" d="M3 16.75 C3 12.25 5.25 10 9.75 10 L30.25 10 C34.75 10 37 12.25 37 16.75 L37 23.25 C37 27.75 34.75 30 30.25 30 L9.75 30 C5.25 30 3 27.75 3 23.25 Z"/><g fill="#282a36" opacity="0.35"><circle cx="9" cy="15.5" r="1.6"/><circle cx="14.5" cy="15.5" r="1.6"/><circle cx="20" cy="15.5" r="1.6"/><circle cx="25.5" cy="15.5" r="1.6"/><circle cx="31" cy="15.5" r="1.6"/><circle cx="11.75" cy="20" r="1.6"/><circle cx="17.25" cy="20" r="1.6"/><circle cx="22.75" cy="20" r="1.6"/><circle cx="28.25" cy="20" r="1.6"/><path d="M13 23.5 L27 23.5 C27.83 23.5 28.5 24.17 28.5 25 C28.5 25.83 27.83 26.5 27 26.5 L13 26.5 C12.17 26.5 11.5 25.83 11.5 25 C11.5 24.17 12.17 23.5 13 23.5 Z"/></g></svg></button>
 </div>
 <div id="preview"></div>
 <div id="pad"><div class="hint">drag = move · tap = click · 2-finger drag = scroll<br>2-finger tap = right click · hold = drag</div>
@@ -103,6 +115,10 @@
 // Remembered in localStorage after the first successful pairing.
 let ws = null, authed = false, pageVer = null;
 const status = document.getElementById("status");
+// The status glyph: the class picks circle (authed) or circle-outline.
+function setStatus(cls, label, color) {
+  status.className = cls; status.setAttribute("aria-label", label); status.style.color = color;
+}
 function askPin(msg) {
   const pin = window.prompt(msg || "cce-remote pairing PIN (shown in the server terminal):");
   if (pin) localStorage.setItem("cce-remote-pin", pin.trim());
@@ -127,14 +143,14 @@ function connect() {
       if (pageVer === null) pageVer = v;
       else if (pageVer !== v) location.reload();
     }
-    else if (e.data === "auth ok") { authed = true; status.textContent = "●"; status.style.color = "#5fbf6f"; }
+    else if (e.data === "auth ok") { authed = true; setStatus("authed", "paired", "#5fbf6f"); }
     else if (e.data === "auth fail") {
       localStorage.removeItem("cce-remote-pin");
       askPin("Wrong PIN — try again:");
       // server closed on failure; onclose reconnects with the new PIN
     }
   };
-  ws.onclose = () => { authed = false; status.textContent = "○"; status.style.color = "#bf5f5f"; setTimeout(connect, 1000); };
+  ws.onclose = () => { authed = false; setStatus("off", "disconnected", "#bf5f5f"); setTimeout(connect, 1000); };
 }
 connect();
 function send(s) { if (authed && ws && ws.readyState === 1) ws.send(s); }

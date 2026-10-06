@@ -28,11 +28,11 @@ app feel. A connection from anywhere else gets a 403 saying so.
 - `left` / `right` buttons — explicit clicks
 - top bar — esc/tab/arrows; ctrl/alt/sup are sticky toggles (tap to hold,
   tap again to release — chords work: ctrl on, tap `c`, ctrl off)
-- ⌨ — summon the phone keyboard (typing goes through a US-layout
+- keyboard button — summon the phone keyboard (typing goes through a US-layout
   char→evdev map; iOS `beforeinput` is used, so autocorrect noise is
   filtered)
-- ☰ — window switcher: tap a window to focus it
-- 🖥 — window view mode: a live stream of the focused window, delivered
+- windows button (three bars) — window switcher: tap a window to focus it
+- menu button (three dots) → live view — window view mode: a live stream of the focused window, delivered
   ack-clocked over a WebSocket — at most one frame in flight, so a slow
   link drops frame rate instead of falling behind — with resolution and
   quality adapting to the measured link (up to 1400px edge when it's fast).
