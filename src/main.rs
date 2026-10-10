@@ -23,8 +23,9 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::os::unix::net::UnixStream;
 use std::time::Duration;
+
+use cce_core::ipc::ctl::{Request, WindowInfo};
 
 mod screencopy;
 mod stream;
@@ -49,9 +50,14 @@ fn page_version() -> &'static str {
 }
 const DEFAULT_PORT: u16 = 17017;
 
+/// `$WAYLAND_DISPLAY`, else `wayland-0`: run from a service or a login shell
+/// with no display set, this still finds the session's compositor.
+fn display() -> String {
+    std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-0".to_string())
+}
+
 fn control_socket_path() -> String {
-    let display = std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-0".to_string());
-    format!("/tmp/cce-{display}.sock")
+    cce_core::ipc::ctl::control_socket_for(Some(&display()))
 }
 
 fn pin_path() -> std::path::PathBuf {
@@ -98,12 +104,7 @@ fn load_or_create_pin() -> std::io::Result<String> {
 /// correct framing — the reply is everything until EOF (commands like
 /// `windows --json` reply with multiple lines).
 fn control_command(cmd: &str) -> std::io::Result<String> {
-    let mut s = UnixStream::connect(control_socket_path())?;
-    s.write_all(cmd.as_bytes())?;
-    s.write_all(b"\n")?;
-    let mut reply = String::new();
-    s.read_to_string(&mut reply)?;
-    Ok(reply)
+    cce_core::ipc::ctl::send_to(&control_socket_path(), cmd, None)
 }
 
 /// True for tokens safe to splice into a control command (window queries:
@@ -383,37 +384,16 @@ fn translate(frame: &str) -> Option<Vec<String>> {
 /// The `windows --json` reply (one JSON object per line) as a JSON array
 /// for the page's switcher.
 fn window_list_json() -> String {
-    let reply = control_command("windows --json").unwrap_or_default();
+    let reply = control_command(&Request::WindowsJson.to_string()).unwrap_or_default();
     let objs: Vec<&str> = reply.lines().filter(|l| l.trim_start().starts_with('{')).collect();
     format!("windows [{}]", objs.join(","))
 }
 
-/// Pull a numeric field out of one windows-json line (no serde — the values
-/// are flat numbers on a single line per window).
-fn json_num(line: &str, key: &str) -> Option<f64> {
-    let pat = format!("\"{key}\":");
-    let rest = &line[line.find(&pat)? + pat.len()..];
-    let end = rest
-        .find(|c: char| !(c.is_ascii_digit() || c == '-' || c == '.'))
-        .unwrap_or(rest.len());
-    rest[..end].parse().ok()
-}
-
 /// The focused app window as (id, x, y, w, h) in layout px.
 fn focused_window() -> Option<(u64, f64, f64, f64, f64)> {
-    let reply = control_command("windows --json").ok()?;
-    for line in reply.lines() {
-        if line.contains("\"focused\":true") && !line.contains("\"mode\":\"Status\"") {
-            return Some((
-                json_num(line, "id")? as u64,
-                json_num(line, "x")?,
-                json_num(line, "y")?,
-                json_num(line, "w")?,
-                json_num(line, "h")?,
-            ));
-        }
-    }
-    None
+    let reply = control_command(&Request::WindowsJson.to_string()).ok()?;
+    let w = WindowInfo::parse_all(&reply).into_iter().find(|w| w.focused && w.mode != "Status")?;
+    Some((w.id, w.x as f64, w.y as f64, w.w as f64, w.h as f64))
 }
 
 /// Screenshot the focused window via the compositor (it replies with the PNG
@@ -421,7 +401,7 @@ fn focused_window() -> Option<(u64, f64, f64, f64, f64)> {
 /// litter ~/Pictures/screenshots.
 fn take_screenshot() -> Option<(Vec<u8>, (u64, f64, f64, f64, f64))> {
     let win = focused_window()?;
-    let reply = control_command(&format!("screenshot window {}", win.0)).ok()?;
+    let reply = control_command(&Request::ScreenshotWindow { id: win.0 }.to_string()).ok()?;
     let path = reply.trim().strip_prefix("ok ")?.trim().to_string();
     let mut bytes = None;
     for _ in 0..5 {
@@ -485,15 +465,11 @@ fn handle_ws(stream: TcpStream, pin: &str, ip: std::net::IpAddr, limiter: &RateL
                     } else if text.trim() == "pl" {
                         // Pointer location (view mode's cursor marker):
                         // "x=N y=N" → "ploc N N".
-                        if let Ok(reply) = control_command("pointer-location") {
-                            let coords: String = reply
-                                .split_whitespace()
-                                .filter_map(|kv| kv.strip_prefix("x=").or_else(|| kv.strip_prefix("y=")))
-                                .collect::<Vec<_>>()
-                                .join(" ");
-                            if !coords.is_empty() {
-                                let _ = ws.send(tungstenite::Message::Text(format!("ploc {coords}")));
-                            }
+                        if let Some((x, y)) = control_command(&Request::PointerLocation.to_string())
+                            .ok()
+                            .and_then(|reply| cce_core::ipc::ctl::parse_pointer_location(&reply))
+                        {
+                            let _ = ws.send(tungstenite::Message::Text(format!("ploc {x} {y}")));
                         }
                     } else if let Some(cmds) = translate(&text) {
                         // Every input-bearing frame goes through translate() —

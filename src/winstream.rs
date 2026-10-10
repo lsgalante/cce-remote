@@ -13,7 +13,7 @@ const MAX_FRAME_BYTES: u32 = 64 * 1024 * 1024;
 
 fn stream_socket_path() -> String {
     let display = std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-0".to_string());
-    format!("/tmp/cce-stream-{display}.sock")
+    cce_core::ipc::ctl::stream_socket_for(Some(&display))
 }
 
 pub struct Reader {
