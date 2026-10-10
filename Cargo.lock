@@ -48,7 +48,7 @@ dependencies = [
 [[package]]
 name = "cce-core"
 version = "0.1.0"
-source = "git+https://github.com/lsgalante/cce-core.git?rev=6a542c18ee31a20cfa3ecaa9da71ffa1d995af04#6a542c18ee31a20cfa3ecaa9da71ffa1d995af04"
+source = "git+https://github.com/lsgalante/cce-core.git?rev=5b8dcb30f1b0d7d607ab49d637069560eca0cb14#5b8dcb30f1b0d7d607ab49d637069560eca0cb14"
 dependencies = [
  "libc",
  "log",
