@@ -337,14 +337,16 @@ Because installs unlink-before-write, the running process stays on the old inode
 `ccebuild install` and keeps serving the old code until restarted:
 
 ```sh
-ccebuild restart                  # picks it up automatically — see below
+ccebuild restart cce-remote       # only if it is on a replaced binary — see below
 systemctl --user restart cce-remote
 ```
 
-`ccebuild restart` does reach it, but not because the unit ships from here: it
-enumerates *running* user services matching `^(cce|gpu-watcher)` and restarts the ones
-whose `/proc/<pid>/exe` reads `(deleted)`. Being named `cce-remote.service` is the whole
-qualification. Editing `index.html` counts as a code change for this purpose — it is
+Always name the crate. Bare `ccebuild restart` restarts *every* running `cce*` user
+service on a replaced binary, including ones another session has installed but is not
+ready to restart (WORKSPACE.md, "Concurrent sessions"). The scoped form reaches this
+service because `cce-remote.service` ships from this crate root, and among those units
+it restarts only the ones whose `/proc/<pid>/exe` reads `(deleted)`; `--all` restarts
+them regardless. Editing `index.html` counts as a code change for this purpose — it is
 `include_str!`'d, so the page only updates once the binary is rebuilt, reinstalled *and*
 the service restarted.
 
