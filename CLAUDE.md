@@ -309,29 +309,23 @@ startup, so a server is bound to whichever session launched it for its whole lif
 ## Build and lifecycle
 
 `make install` → `ccebuild install --no-build cce-remote`. Never hand-list binaries in
-the Makefile — `cargo metadata` already knows them. No `Cargo.lock` is tracked here, so
-dependency changes need no lockfile refresh.
+the Makefile — `cargo metadata` already knows them. `Cargo.lock` is committed here, so
+refresh it when dependencies change.
 
 **Committing is not publishing — pushing is.** This directory is its own git repository
-whose `origin` is the local *bare* repo `~/git/cce-remote.git` (a real, pushable
-remote). `published` is the old fetch-only static mirror
-`https://git.lucas.co/cce-remote.git`, kept for reference; it never accepted a push
-(dumb HTTP, no receive-pack) and that is exactly why the bare layer exists — see
-`~/.local/bin/git-bare-sync.sh`. `repos.conf` lists the **bare** path, and
-`gitsite.timer` republishes when a listed bare repo's HEAD moves. So the chain is:
+whose `origin` is GitHub (`https://github.com/lsgalante/cce-remote.git`), and a
+post-commit hook pushes each commit there. `repos.conf` lists the GitHub URL, and
+`gitsite.timer` mirrors GitHub to `https://git.lucas.co/cce-remote.git` hourly; that
+mirror is read-only (dumb HTTP) and nothing pins or fetches from it. So the chain is:
 
 ```sh
-git commit ...                 # local only
-git push origin master         # this is the publishing step
+git commit ...                 # the post-commit hook pushes to GitHub
+git log origin/master..        # empty means it landed
                                # gitsite.timer then mirrors it to git.lucas.co
 ```
 
-An unpushed commit looks published on this machine and is not on the site. That gap was
-workspace-wide on 2026-09-18 — 21 crates held unpushed commits, because
-`git-bare-sync.sh` (the bulk pusher) read `repos.conf` field 2 as a work tree when it
-holds the bare path, and silently skipped every repo. It is fixed and now versioned in
-the gitsite repo, so `git-bare-sync.sh` pushes the whole set in one go; the backlog
-stands until someone runs it.
+A commit whose push failed (hook missing, network down) looks published on this machine
+and is on no remote at all; nothing warns, so the `git log` check is the only safeguard.
 
 **The server does not run in the foreground — it is a user service.** `cce-remote.service`
 ships from this crate root and is installed by `ccebuild` (classified as a user unit by
