@@ -314,14 +314,11 @@ refresh it when dependencies change.
 
 **Committing is not publishing — pushing is.** This directory is its own git repository
 whose `origin` is GitHub (`https://github.com/lsgalante/cce-remote.git`), and a
-post-commit hook pushes each commit there. `repos.conf` lists the GitHub URL, and
-`gitsite.timer` mirrors GitHub to `https://git.lucas.co/cce-remote.git` hourly; that
-mirror is read-only (dumb HTTP) and nothing pins or fetches from it. So the chain is:
+post-commit hook pushes each commit there. So the chain is:
 
 ```sh
 git commit ...                 # the post-commit hook pushes to GitHub
 git log origin/master..        # empty means it landed
-                               # gitsite.timer then mirrors it to git.lucas.co
 ```
 
 A commit whose push failed (hook missing, network down) looks published on this machine
