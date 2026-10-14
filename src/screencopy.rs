@@ -62,18 +62,16 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for CapState {
         _: &QueueHandle<Self>,
     ) {
         match event {
-            zwlr_screencopy_frame_v1::Event::Buffer { format, width, height, stride } => {
-                if let WEnum::Value(f) = format {
-                    // prefer 32-bit formats we know how to swizzle
-                    if matches!(
-                        f,
-                        wl_shm::Format::Xrgb8888
-                            | wl_shm::Format::Argb8888
-                            | wl_shm::Format::Xbgr8888
-                            | wl_shm::Format::Abgr8888
-                    ) {
-                        state.buffer_meta = Some((width, height, stride, f));
-                    }
+            zwlr_screencopy_frame_v1::Event::Buffer { format: WEnum::Value(f), width, height, stride } => {
+                // prefer 32-bit formats we know how to swizzle
+                if matches!(
+                    f,
+                    wl_shm::Format::Xrgb8888
+                        | wl_shm::Format::Argb8888
+                        | wl_shm::Format::Xbgr8888
+                        | wl_shm::Format::Abgr8888
+                ) {
+                    state.buffer_meta = Some((width, height, stride, f));
                 }
             }
             zwlr_screencopy_frame_v1::Event::BufferDone => state.buffer_done = true,
@@ -155,7 +153,6 @@ impl CaptureSession {
                 let ms = remaining.as_millis().min(200) as i32;
                 let _ = rustix::event::poll(&mut fds, ms.max(1));
                 let readable = fds[0].revents().contains(rustix::event::PollFlags::IN);
-                drop(fds);
                 if readable {
                     let _ = guard.read();
                 } // else: drop the guard without reading and re-check
@@ -287,10 +284,10 @@ pub fn downscale_encode(
     if w == 0 || h == 0 || (stride * h) as usize > data.len() {
         return Err("bad frame dimensions".into());
     }
-    let f = ((w.max(h) + max_edge - 1) / max_edge).max(1);
+    let f = w.max(h).div_ceil(max_edge).max(1);
     let (ow, oh) = (w / f, h / f);
     let mut rgb = Vec::with_capacity((ow * oh * 3) as usize);
-    let fsq = (f * f) as u32;
+    let fsq = f * f;
     for oy in 0..oh {
         for ox in 0..ow {
             let (mut r, mut g, mut b) = (0u32, 0u32, 0u32);

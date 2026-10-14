@@ -389,8 +389,11 @@ fn window_list_json() -> String {
     format!("windows [{}]", objs.join(","))
 }
 
-/// The focused app window as (id, x, y, w, h) in layout px.
-fn focused_window() -> Option<(u64, f64, f64, f64, f64)> {
+/// A window as (id, x, y, w, h) in layout px.
+type WindowBox = (u64, f64, f64, f64, f64);
+
+/// The focused app window.
+fn focused_window() -> Option<WindowBox> {
     let reply = control_command(&Request::WindowsJson.to_string()).ok()?;
     let w = WindowInfo::parse_all(&reply).into_iter().find(|w| w.focused && w.mode != "Status")?;
     Some((w.id, w.x as f64, w.y as f64, w.w as f64, w.h as f64))
@@ -399,7 +402,7 @@ fn focused_window() -> Option<(u64, f64, f64, f64, f64)> {
 /// Screenshot the focused window via the compositor (it replies with the PNG
 /// path), read the bytes, and DELETE the file — the remote view must not
 /// litter ~/Pictures/screenshots.
-fn take_screenshot() -> Option<(Vec<u8>, (u64, f64, f64, f64, f64))> {
+fn take_screenshot() -> Option<(Vec<u8>, WindowBox)> {
     let win = focused_window()?;
     let reply = control_command(&Request::ScreenshotWindow { id: win.0 }.to_string()).ok()?;
     let path = reply.trim().strip_prefix("ok ")?.trim().to_string();
@@ -455,33 +458,28 @@ fn handle_ws(stream: TcpStream, pin: &str, ip: std::net::IpAddr, limiter: &RateL
     let _ = ws.send(tungstenite::Message::Text("auth ok".into()));
     let _ = ws.send(tungstenite::Message::Text(format!("ver {}", page_version())));
     println!("[cce-remote] client connected: {peer}");
-    loop {
-        match ws.read() {
-            Ok(msg) => {
-                if let tungstenite::Message::Text(text) = msg {
-                    if text.trim() == "wl" {
-                        // Window-list request: the one message with a reply.
-                        let _ = ws.send(tungstenite::Message::Text(window_list_json()));
-                    } else if text.trim() == "pl" {
-                        // Pointer location (view mode's cursor marker):
-                        // "x=N y=N" → "ploc N N".
-                        if let Some((x, y)) = control_command(&Request::PointerLocation.to_string())
-                            .ok()
-                            .and_then(|reply| cce_core::ipc::ctl::parse_pointer_location(&reply))
-                        {
-                            let _ = ws.send(tungstenite::Message::Text(format!("ploc {x} {y}")));
-                        }
-                    } else if let Some(cmds) = translate(&text) {
-                        // Every input-bearing frame goes through translate() —
-                        // `wl` and `pl` above are the only exceptions, and they
-                        // send fixed commands with no caller-supplied content.
-                        for cmd in cmds {
-                            let _ = control_command(&cmd);
-                        }
-                    }
+    while let Ok(msg) = ws.read() {
+        if let tungstenite::Message::Text(text) = msg {
+            if text.trim() == "wl" {
+                // Window-list request: the one message with a reply.
+                let _ = ws.send(tungstenite::Message::Text(window_list_json()));
+            } else if text.trim() == "pl" {
+                // Pointer location (view mode's cursor marker):
+                // "x=N y=N" → "ploc N N".
+                if let Some((x, y)) = control_command(&Request::PointerLocation.to_string())
+                    .ok()
+                    .and_then(|reply| cce_core::ipc::ctl::parse_pointer_location(&reply))
+                {
+                    let _ = ws.send(tungstenite::Message::Text(format!("ploc {x} {y}")));
+                }
+            } else if let Some(cmds) = translate(&text) {
+                // Every input-bearing frame goes through translate() —
+                // `wl` and `pl` above are the only exceptions, and they
+                // send fixed commands with no caller-supplied content.
+                for cmd in cmds {
+                    let _ = control_command(&cmd);
                 }
             }
-            Err(_) => break,
         }
     }
     println!("[cce-remote] client disconnected: {peer}");
