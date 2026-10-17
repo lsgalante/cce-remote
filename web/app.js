@@ -13,28 +13,39 @@ const note = (text) => {
   el.style.display = 'grid';
 };
 
-// An on-screen keyboard covers the page rather than resizing it (iOS):
-// follow the visual viewport, so the canvas ends where the keyboard begins
-// and the trackpad shrinks to stay whole above it.
+// An on-screen keyboard covers the page rather than resizing it (iOS, in a
+// Safari tab): follow the visual viewport, so the canvas ends where the
+// keyboard begins and the trackpad shrinks to stay whole above it (--kb).
 //
-// Opened from the home screen (navigator.standalone), iOS sizes the viewport
-// as if the status bar took room although the page starts under it: 873 of
-// a 932px screen, and nothing is drawn below it, not even a canvas sized
-// past it (that cut the click buttons off where the screen's corners
-// start). So the canvas stays the viewport, the band under it is painted
-// the app's colour (src/web/mod.rs), and the bottom safe area, which lies
-// in that band, is not kept clear (--safe-b: the home indicator is below).
+// Opened from the home screen, iOS 26 sizes the viewport as if the status
+// bar took room although the page starts under it (WebKit 301108; 873 of a
+// 932px screen here), and draws nothing below it, not even a canvas sized
+// past it. A manifest does not help: apps with one report the same. What
+// does is the document's own height: `html { height: 100vh }` (index.html,
+// under data-standalone) gives the page the whole screen. Where that fails,
+// the band left under the canvas is painted the app's colour
+// (src/web/mod.rs) and its bottom safe area is not kept clear (--safe-b).
+//
+// The full-screen app's viewport shrinks with the keyboard (a tab's does
+// not), so "the keyboard is up" (--kb-up, src/web/app.rs) is the visible
+// height against the tallest seen at this width, not against innerHeight.
 const vv = window.visualViewport;
+const standalone = navigator.standalone === true || matchMedia('(display-mode: standalone)').matches;
+if (standalone) document.documentElement.dataset.standalone = 'true';
+let tallest = { w: 0, h: 0 };
 const fit = () => {
+  const visible = vv ? vv.height + vv.offsetTop : window.innerHeight;
+  if (window.innerWidth !== tallest.w) tallest = { w: window.innerWidth, h: 0 };
+  tallest.h = Math.max(tallest.h, window.innerHeight, visible);
   // A few px of difference is the viewport's rounding, not a keyboard
   // (none is that short): read as one, it left a sliver of bare page.
-  const gap = vv ? window.innerHeight - vv.height - vv.offsetTop : 0;
-  const kb = gap > 80 ? gap : 0;
+  const covered = window.innerHeight - visible;
   const root = document.documentElement.style;
-  root.setProperty('--kb', kb + 'px');
+  root.setProperty('--kb', (covered > 80 ? covered : 0) + 'px');
+  root.setProperty('--kb-up', tallest.h - visible > 80 ? '1' : '0');
   const portrait = window.innerHeight >= window.innerWidth;
   const screenH = portrait ? Math.max(screen.width, screen.height) : Math.min(screen.width, screen.height);
-  if (navigator.standalone && screenH - window.innerHeight > 20) {
+  if (standalone && screenH - tallest.h > 20) {
     root.setProperty('--safe-b', '0px');
   } else {
     root.removeProperty('--safe-b');

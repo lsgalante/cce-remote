@@ -220,13 +220,15 @@ fn safe_insets() -> [f32; 4] {
     let Some(window) = web_sys::window() else { return [0.0; 4] };
     let Some(doc) = window.document() else { return [0.0; 4] };
     let px = |v: String| v.trim().trim_end_matches("px").parse::<f32>().unwrap_or(0.0).max(0.0);
-    let kb = doc
+    // app.js's word, not `--kb`: a home-screen app's viewport shrinks with
+    // the keyboard, so there the canvas needs no offset and --kb is 0.
+    let kb_up = doc
         .document_element()
         .and_then(|e| window.get_computed_style(&e).ok().flatten())
-        .map_or(0.0, |st| px(st.get_property_value("--kb").unwrap_or_default()));
+        .is_some_and(|st| st.get_property_value("--kb-up").unwrap_or_default().trim() == "1");
     let Some(st) = doc.get_element_by_id("safe").and_then(|e| window.get_computed_style(&e).ok().flatten()) else { return [0.0; 4] };
     let side = |name: &str| px(st.get_property_value(name).unwrap_or_default());
-    let bottom = if kb > 0.0 { 0.0 } else { side("padding-bottom") };
+    let bottom = if kb_up { 0.0 } else { side("padding-bottom") };
     let plate = cce_ui::layout::root_plate_inset();
     [side("padding-top"), side("padding-right"), bottom, side("padding-left")].map(|v| (v - plate).max(0.0))
 }

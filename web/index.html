@@ -12,6 +12,11 @@
 <meta name="theme-color" content="#14151c">
 <style>
   html, body { margin: 0; height: 100%; background: #14151c; overflow: hidden; overscroll-behavior: none; }
+  /* A home-screen app (app.js sets data-standalone): iOS 26 sizes its
+     viewport short by the status bar and draws nothing below it; the
+     document's own height is what gets it the whole screen. Not in a tab,
+     where 100vh runs under the toolbar. */
+  html[data-standalone] { height: 100vh; }
   /* The canvas fills the screen, the safe areas (notch, status bar, home
      indicator) included, and ends where the keyboard begins (--kb, set by
      app.js from the visual viewport). The app keeps its controls clear of
