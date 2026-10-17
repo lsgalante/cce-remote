@@ -12,17 +12,20 @@
 <meta name="theme-color" content="#14151c">
 <style>
   html, body { margin: 0; height: 100%; background: #14151c; overflow: hidden; overscroll-behavior: none; }
-  /* The canvas fills the safe area and ends where the keyboard begins
-     (--kb, set by app.js from the visual viewport); the app lays itself
-     out in whatever box this gives it. */
+  /* The canvas fills the screen, the safe areas (notch, status bar, home
+     indicator) included, and ends where the keyboard begins (--kb, set by
+     app.js from the visual viewport). The app keeps its controls clear of
+     the safe areas itself, reading them from #safe below (src/web/app.rs,
+     safe_insets), so its plate reaches the screen's edges. */
   #app {
     position: fixed;
-    top: env(safe-area-inset-top); right: env(safe-area-inset-right);
-    bottom: max(env(safe-area-inset-bottom), var(--kb, 0px)); left: env(safe-area-inset-left);
-    width: calc(100% - env(safe-area-inset-left) - env(safe-area-inset-right));
-    height: calc(100% - env(safe-area-inset-top) - max(env(safe-area-inset-bottom), var(--kb, 0px)));
+    top: 0; right: 0; bottom: var(--kb, 0px); left: 0;
+    width: 100%; height: calc(100% - var(--kb, 0px));
     display: block; touch-action: none; -webkit-user-select: none; user-select: none;
   }
+  /* The safe areas, as padding the app can read. */
+  #safe { position: fixed; visibility: hidden; pointer-events: none; top: 0; left: 0;
+          padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
   /* The phone keyboard's target (src/web/kb.rs): focusable but out of
      sight. Not display:none, which could not take focus. */
   #kb { position: absolute; opacity: 0.02; width: 1px; height: 1px; left: -10px; top: -10px; font-size: 16px; }
@@ -32,6 +35,7 @@
 </head>
 <body>
 <canvas id="app"></canvas>
+<div id="safe"></div>
 <textarea id="kb" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false"></textarea>
 <div id="note"></div>
 <script type="module" src="/app.js?v=__V__"></script>

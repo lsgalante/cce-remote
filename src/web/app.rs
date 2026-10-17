@@ -205,6 +205,26 @@ fn label_font() -> (String, f32) {
     cce_ui::layout::control_label_font_parsed()
 }
 
+/// The phone's safe areas as `[top, right, bottom, left]` px: the notch or
+/// status bar, the home indicator. The canvas covers them, so the root
+/// plate reaches the screen's edges; the controls are laid out clear of
+/// them. Read from `#safe` (index.html), whose padding is the `env()`
+/// insets. Above the keyboard the bottom one is the keyboard's: the canvas
+/// already ends where it begins.
+fn safe_insets() -> [f32; 4] {
+    let Some(window) = web_sys::window() else { return [0.0; 4] };
+    let Some(doc) = window.document() else { return [0.0; 4] };
+    let px = |v: String| v.trim().trim_end_matches("px").parse::<f32>().unwrap_or(0.0).max(0.0);
+    let kb = doc
+        .document_element()
+        .and_then(|e| window.get_computed_style(&e).ok().flatten())
+        .map_or(0.0, |st| px(st.get_property_value("--kb").unwrap_or_default()));
+    let Some(st) = doc.get_element_by_id("safe").and_then(|e| window.get_computed_style(&e).ok().flatten()) else { return [0.0; 4] };
+    let side = |name: &str| px(st.get_property_value(name).unwrap_or_default());
+    let bottom = if kb > 0.0 { 0.0 } else { side("padding-bottom") };
+    [side("padding-top"), side("padding-right"), bottom, side("padding-left")]
+}
+
 /// One line of `text` as the paint shapes it: where the caret stands at
 /// each char boundary. `measure_text_width` is an inked extent, not an
 /// advance, and a caret placed by it walked off the glyphs it followed.
@@ -233,8 +253,10 @@ impl RemoteApp {
     /// Lay the frame out from the state: which bands show, where the pad
     /// and the panel are, what the panel lists.
     fn layout(&mut self) {
+        let [it, ir, ib, il] = safe_insets();
+        let frame = Rect { x: il, y: it, width: (self.width - il - ir).max(0.0), height: (self.height - it - ib).max(0.0) };
         if agent::is_on() {
-            self.agent.layout(&mut self.ui, self.width, self.height);
+            self.agent.layout(&mut self.ui, frame);
             self.roots = self.agent.roots().to_vec();
             // No trackpad and no panel: pad.rs leaves every touch to cce-ui.
             state::with(|s| {
@@ -274,8 +296,11 @@ impl RemoteApp {
         let clicks = row(&mut arena, CLICK_H, controls_gap);
         let l = leaf(&mut arena, clicks, 0.0, CLICK_H, 1.0);
         let r = leaf(&mut arena, clicks, 0.0, CLICK_H, 1.0);
-        compute_layout(&mut arena, root, LSize::new(self.width, self.height));
-        let rect = |id| arena.value(id).unwrap().rect;
+        compute_layout(&mut arena, root, LSize::new(frame.width, frame.height));
+        let rect = |id| {
+            let r: Rect = arena.value(id).unwrap().rect;
+            Rect { x: r.x + frame.x, y: r.y + frame.y, ..r }
+        };
 
         let ui = &mut self.ui;
         self.roots.clear();

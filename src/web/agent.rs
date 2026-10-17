@@ -664,8 +664,33 @@ impl View {
         ui[b].set_rect(r.x, r.y, r.width, r.height);
     }
 
-    /// Lay the screen out in a `w`×`h` frame.
-    pub fn layout(&mut self, ui: &mut UiContext, w: f32, h: f32) {
+    /// Lay the screen out in `frame` (the canvas less the phone's safe
+    /// areas): laid out at the origin, then moved there.
+    pub fn layout(&mut self, ui: &mut UiContext, frame: Rect) {
+        self.layout_at(ui, frame.width, frame.height);
+        let (dx, dy) = (frame.x, frame.y);
+        if dx == 0.0 && dy == 0.0 {
+            return;
+        }
+        let at = |r: Rect| Rect { x: r.x + dx, y: r.y + dy, ..r };
+        let mut buttons = vec![self.back, self.more, self.send, self.kbd, self.deny, self.always, self.allow];
+        buttons.extend(self.menu_rows.iter().copied());
+        for b in buttons {
+            let Some((x, y, bw, bh)) = ui.get_widget(b.id()).map(|w| w.rect()) else { continue };
+            // OFF stays off.
+            if x > OFF.x {
+                ui[b].set_rect(x + dx, y + dy, bw, bh);
+            }
+        }
+        self.title_rect = at(self.title_rect);
+        self.body = at(self.body);
+        self.card = self.card.map(at);
+        self.strip = self.strip.map(at);
+        self.menu = self.menu.map(at);
+        ui.rebuild_spatial_grid();
+    }
+
+    fn layout_at(&mut self, ui: &mut UiContext, w: f32, h: f32) {
         let pad = cce_ui::layout::plate_padding();
         let gap = cce_ui::layout::list_gap();
         let (screen, tr, readonly) = with(|d| (d.screen.clone().unwrap_or(Screen::List), d.tr.clone(), d.readonly_screen()));
