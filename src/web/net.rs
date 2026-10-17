@@ -106,6 +106,7 @@ pub fn connect() {
 fn on_input_message(text: &str) {
     if text == "auth ok" {
         state::with(|s| s.conn = Conn::Paired);
+        super::agent::reconnected();
     } else if text == "auth fail" {
         // The loader asks for the PIN when it has none: forget this one and
         // start over there.
@@ -125,7 +126,7 @@ fn on_input_message(text: &str) {
             Some(old) => old != v,
         });
         if reload {
-            let _ = web_sys::window().unwrap().location().reload();
+            super::place::reload();
         }
         return;
     } else if text == "ti 1" || text == "ti 0" {

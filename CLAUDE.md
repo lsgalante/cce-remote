@@ -427,7 +427,13 @@ tinted as `upload_icon_tinted` tints) — copy again if a glyph is redrawn.
 the wasm (~1.7 MB gzipped, served with `Content-Encoding: gzip`) are fetched under
 `?v=<version>` and marked immutable, so a phone downloads the app once per server build.
 The `ver` frame after pairing reloads a page whose server has restarted onto new code,
-as before.
+as before — and the page comes back where it was (`place.rs`): the live view, or the
+Agent view's screen and draft, saved to `sessionStorage` just before the reload (the
+menu's "Reload page" too) and taken once at start, so a page opened afresh still starts
+on the trackpad. Restored before the input socket pairs, the Agent view's first request
+is dropped; `agent::reconnected` (on every `auth ok`) clears what was in flight and asks
+again — without it, a request lost to any reconnect left the view's timer waiting on it
+for good.
 
 `SCROLL = 0.8`, not the 0.045 it started as: axis values reach clients as surface-px
 deltas, so near-unity is the trackpad-like 1:1 feel. A 300px swipe used to scroll one line.

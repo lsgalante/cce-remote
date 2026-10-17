@@ -439,9 +439,7 @@ impl RemoteApp {
                     }
                     agent::show();
                 }
-                Row::Reload => {
-                    let _ = window.location().reload();
-                }
+                Row::Reload => super::place::reload(),
                 Row::System => state::with(|s| s.overlay = Some(Overlay::System)),
                 Row::Back => state::with(|s| s.overlay = Some(Overlay::Menu)),
                 Row::Sys(sys) => {
@@ -637,6 +635,15 @@ impl Application for RemoteApp {
             .map(|_| ui.insert(Button::new(0.0, 0.0, 0.0, 0.0).with_label("")))
             .collect();
         let agent = agent::View::new(&mut ui);
+        // Back where a reload left the page (a restart onto new code).
+        if let Some(p) = super::place::take() {
+            if p.view {
+                Self::set_view(true);
+            }
+            if let Some((screen, draft)) = p.agent {
+                agent::restore(screen, draft);
+            }
+        }
         Self {
             agent,
             ui,

@@ -237,9 +237,39 @@ fn refresh() {
 
 /// Open the view (the menu's row).
 pub fn show() {
+    open(Screen::List);
+}
+
+/// Where the view is, for a reload to come back to (`place`): the screen
+/// and the draft, `None` while it is off.
+pub fn place() -> Option<(Screen, String)> {
+    with(|d| d.on.then(|| (d.screen.clone().unwrap_or(Screen::List), d.draft.clone())))
+}
+
+/// Back where a reload left it. The page is not paired yet, so the first
+/// request is dropped; [`reconnected`] asks again.
+pub fn restore(screen: Screen, draft: String) {
+    with(|d| d.draft = draft);
+    open(screen);
+}
+
+/// The input socket paired (again). A request out when it dropped has no
+/// answer coming, and one asked while it was down was never sent: either
+/// left `in_flight` set, and the timer would wait on it for good.
+pub fn reconnected() {
+    with(|d| {
+        d.in_flight = false;
+        d.asked.clear();
+    });
+    if is_on() {
+        refresh();
+    }
+}
+
+fn open(screen: Screen) {
     with(|d| {
         d.on = true;
-        d.screen = Some(Screen::List);
+        d.screen = Some(screen);
         d.in_flight = false;
     });
     refresh();

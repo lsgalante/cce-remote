@@ -10,6 +10,7 @@
 //! | `kb` | the phone keyboard's hidden textarea |
 //! | `icons` | the cce-icons glyphs, compiled in |
 //! | `agent` | the Agent view: Code Agent's sessions, a transcript, a prompt |
+//! | `place` | where the page was, kept across a reload |
 
 mod agent;
 mod app;
@@ -17,6 +18,7 @@ mod icons;
 mod kb;
 mod net;
 mod pad;
+mod place;
 mod state;
 
 use cce_ui::web::{Fonts, Sizing};
