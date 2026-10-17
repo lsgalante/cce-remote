@@ -351,7 +351,8 @@ keyboard sink lacks the iOS Backspace fix, so:
 - **`kb.rs` owns the keyboard**: its own hidden `<textarea id="kb">`, not cce-ui's sink.
 - **The app's buttons act in cce-ui's `pointerup` dispatch** (`handle_mouse_input` →
   `drain`), synchronously — which is what lets the keyboard button, the type bar and
-  the left button raise the phone keyboard (a focus made inside the gesture).
+  the left button raise the phone keyboard (a focus made inside the gesture;
+  confirmed on an iPhone, iOS 26.5, along with the sentinel Backspace below).
 - **`state` is a thread-local the app and the listeners share.** Never call into the DOM
   inside `state::with`: focusing the textarea raises `focus` synchronously, its listener
   takes the state again, and the nested borrow panics.
