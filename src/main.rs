@@ -376,7 +376,22 @@ fn translate(frame: &str) -> Option<Vec<String>> {
             format!("focus-window {target}")
         }
         // Named commands, individually whitelisted — never pass-through.
+        // The page's System menu. Each name maps to a FIXED command,
+        // matched against a literal: none takes anything from the frame
+        // (the focused window is the compositor's to resolve), and the wire
+        // names are deliberately not the compositor's own, so a frame naming
+        // a compositor command (`cmd exit`) is dropped like any other.
         "cmd" => match it.next()? {
+            "restart-focused-app" => "restart-app".to_string(),
+            "close-focused" => "close".to_string(),
+            "fullscreen" => "fullscreen".to_string(),
+            "overview" => "overview".to_string(),
+            "screenshot" => "screenshot".to_string(),
+            "reload-config" => "reload".to_string(),
+            "lock" => "lock".to_string(),
+            "display-off" => "idle display off".to_string(),
+            "sleep" => "idle sleep".to_string(),
+            "log-out" => "exit".to_string(),
             "restart-compositor" => "restart-compositor".to_string(),
             _ => return None,
         },
@@ -518,8 +533,20 @@ fn handle_ws(stream: Conn, pin: &str, ip: std::net::IpAddr, limiter: &RateLimite
                 // Every input-bearing frame goes through translate() —
                 // `wl` and `pl` above are the only exceptions, and they
                 // send fixed commands with no caller-supplied content.
-                for cmd in cmds {
-                    let _ = control_command(&cmd);
+                if text.starts_with("cmd ") {
+                    // A System-menu action may reply only when done
+                    // (`restart-app` waits up to 10s for the app to exit,
+                    // `lock` for every output to show the lock): off this
+                    // thread, so the trackpad does not stall behind it.
+                    std::thread::spawn(move || {
+                        for cmd in cmds {
+                            let _ = control_command(&cmd);
+                        }
+                    });
+                } else {
+                    for cmd in cmds {
+                        let _ = control_command(&cmd);
+                    }
                 }
             }
         }
@@ -1175,10 +1202,33 @@ mod tests {
 
     #[test]
     fn named_commands_are_whitelisted_never_passed_through() {
+        // The System menu: each name to its fixed command.
+        for (name, cmd) in [
+            ("restart-focused-app", "restart-app"),
+            ("close-focused", "close"),
+            ("fullscreen", "fullscreen"),
+            ("overview", "overview"),
+            ("screenshot", "screenshot"),
+            ("reload-config", "reload"),
+            ("lock", "lock"),
+            ("display-off", "idle display off"),
+            ("sleep", "idle sleep"),
+            ("log-out", "exit"),
+            ("restart-compositor", "restart-compositor"),
+        ] {
+            assert_eq!(one(&format!("cmd {name}")), cmd);
+        }
+        // Restarting the focused app names no app: a target in the frame is
+        // dropped, never forwarded (`restart-app foot` would restart foot).
+        assert_eq!(one("cmd restart-focused-app foot"), "restart-app");
         assert_eq!(one("cmd restart-compositor"), "restart-compositor");
         // Trailing junk is discarded, not appended.
         assert_eq!(one("cmd restart-compositor rm -rf"), "restart-compositor");
-        for frame in ["cmd exit", "cmd reload", "cmd spawn foot", "cmd RESTART-COMPOSITOR"] {
+        for frame in [
+            "cmd exit", "cmd reload", "cmd spawn foot", "cmd RESTART-COMPOSITOR",
+            // The compositor's own names for the menu's actions.
+            "cmd restart-app", "cmd close", "cmd idle", "cmd lock-screen", "cmd exit force",
+        ] {
             assert!(translate(frame).is_none(), "{frame:?} should be dropped");
         }
     }

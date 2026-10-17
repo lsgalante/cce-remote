@@ -55,6 +55,10 @@ picked up without a restart.
   filtered). A tap that opens a text field on the desktop raises it by
   itself; a field opened any other way shows a "tap to type" bar
 - windows button (three bars) — window switcher: tap a window to focus it
+- menu button (three dots) → System: restart or close the focused app,
+  toggle its fullscreen, overview, screenshot, reload config, lock, display
+  off, sleep, log out, restart the compositor (the ones that lose work ask
+  first)
 - menu button (three dots) → live view — window view mode: a live stream of the focused window, delivered
   ack-clocked over a WebSocket — at most one frame in flight, so a slow
   link drops frame rate instead of falling behind — with resolution and

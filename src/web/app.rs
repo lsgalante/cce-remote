@@ -58,7 +58,90 @@ enum Row {
     Window(u64),
     ToggleView,
     Reload,
-    Restart,
+    /// Opens the System list.
+    System,
+    /// Back from it to the menu.
+    Back,
+    Sys(Sys),
+}
+
+/// The System list: compositor actions the server whitelists by these wire
+/// names (`translate`'s `cmd` arm), each a fixed command with nothing from
+/// the page in it. The focused app is the desktop's focused window, which
+/// the compositor resolves.
+#[derive(Debug, Clone, Copy)]
+enum Sys {
+    RestartApp,
+    CloseFocused,
+    Fullscreen,
+    Overview,
+    Screenshot,
+    ReloadConfig,
+    Lock,
+    DisplayOff,
+    Sleep,
+    LogOut,
+    RestartCompositor,
+}
+
+impl Sys {
+    const ALL: [Sys; 11] = [
+        Sys::RestartApp,
+        Sys::CloseFocused,
+        Sys::Fullscreen,
+        Sys::Overview,
+        Sys::Screenshot,
+        Sys::ReloadConfig,
+        Sys::Lock,
+        Sys::DisplayOff,
+        Sys::Sleep,
+        Sys::LogOut,
+        Sys::RestartCompositor,
+    ];
+
+    fn wire(self) -> &'static str {
+        match self {
+            Sys::RestartApp => "restart-focused-app",
+            Sys::CloseFocused => "close-focused",
+            Sys::Fullscreen => "fullscreen",
+            Sys::Overview => "overview",
+            Sys::Screenshot => "screenshot",
+            Sys::ReloadConfig => "reload-config",
+            Sys::Lock => "lock",
+            Sys::DisplayOff => "display-off",
+            Sys::Sleep => "sleep",
+            Sys::LogOut => "log-out",
+            Sys::RestartCompositor => "restart-compositor",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Sys::RestartApp => "Restart focused app…",
+            Sys::CloseFocused => "Close focused window",
+            Sys::Fullscreen => "Toggle fullscreen",
+            Sys::Overview => "Overview",
+            Sys::Screenshot => "Screenshot",
+            Sys::ReloadConfig => "Reload config",
+            Sys::Lock => "Lock screen",
+            Sys::DisplayOff => "Turn display off",
+            Sys::Sleep => "Sleep…",
+            Sys::LogOut => "Log out…",
+            Sys::RestartCompositor => "Restart compositor…",
+        }
+    }
+
+    /// Asked before the action (the `…` in its label): the ones that lose
+    /// work or drop the remote's own connection.
+    fn confirm(self) -> Option<&'static str> {
+        Some(match self {
+            Sys::RestartApp => "Restart the focused app? Its windows close and it starts again; unsaved work in it may be lost.",
+            Sys::Sleep => "Put the computer to sleep? The remote disconnects until it wakes.",
+            Sys::LogOut => "Log out? Every app closes and the session ends, the remote with it.",
+            Sys::RestartCompositor => "Restart the compositor? Every app in the session will close, then the session relaunches.",
+            _ => return None,
+        })
+    }
 }
 
 type Btn = Handle<Adapted<Button>>;
@@ -73,6 +156,8 @@ pub struct RemoteApp {
     rows: Vec<Btn>,
     row_actions: Vec<Row>,
     list_scroll: f32,
+    /// The list the panel showed last: another one starts at its top.
+    shown_overlay: Option<Overlay>,
     /// The widgets that take events this frame.
     roots: Vec<WidgetId>,
 
@@ -193,13 +278,18 @@ impl RemoteApp {
         self.row_actions = match overlay {
             None => Vec::new(),
             Some(Overlay::Switcher) => state::with(|s| s.windows.iter().map(|w| Row::Window(w.id)).take(ROWS).collect()),
-            Some(Overlay::Menu) => vec![Row::ToggleView, Row::Reload, Row::Restart],
+            Some(Overlay::Menu) => vec![Row::ToggleView, Row::Reload, Row::System],
+            Some(Overlay::System) => std::iter::once(Row::Back).chain(Sys::ALL.into_iter().map(Row::Sys)).collect(),
         };
         let (view, windows) = state::with(|s| (s.view, s.windows.clone()));
         let inner = cce_ui::layout::plate_padding();
         let rgap = cce_ui::layout::list_gap();
         let o = self.overlay_rect.unwrap_or(Rect::ZERO);
         let max_scroll = (self.row_actions.len() as f32 * (ROW_H + rgap) - rgap + 2.0 * inner - o.height).max(0.0);
+        if overlay != self.shown_overlay {
+            self.shown_overlay = overlay;
+            self.list_scroll = 0.0;
+        }
         self.list_scroll = self.list_scroll.clamp(0.0, max_scroll);
         for (i, h) in self.rows.iter().enumerate() {
             let action = self.row_actions.get(i).copied();
@@ -217,7 +307,9 @@ impl RemoteApp {
                 }
                 Row::ToggleView => ((if view { "Switch to trackpad" } else { "Show focused window (live view)" }).to_string(), false),
                 Row::Reload => ("Reload page".to_string(), false),
-                Row::Restart => ("Restart compositor…".to_string(), false),
+                Row::System => ("System…".to_string(), false),
+                Row::Back => ("Back".to_string(), false),
+                Row::Sys(sys) => (sys.label().to_string(), false),
             };
             ui[*h].set_label(&label);
             ui[*h].selected = selected;
@@ -279,7 +371,7 @@ impl RemoteApp {
                     }
                 }
                 Action::Menu => state::with(|s| {
-                    s.overlay = if s.overlay == Some(Overlay::Menu) { None } else { Some(Overlay::Menu) };
+                    s.overlay = if matches!(s.overlay, Some(Overlay::Menu | Overlay::System)) { None } else { Some(Overlay::Menu) };
                 }),
                 Action::Keyboard => kb::toggle(),
             }
@@ -302,12 +394,12 @@ impl RemoteApp {
                 Row::Reload => {
                     let _ = window.location().reload();
                 }
-                Row::Restart => {
-                    let ok = window
-                        .confirm_with_message("Restart the compositor? Every app in the session will close, then the session relaunches.")
-                        .unwrap_or(false);
+                Row::System => state::with(|s| s.overlay = Some(Overlay::System)),
+                Row::Back => state::with(|s| s.overlay = Some(Overlay::Menu)),
+                Row::Sys(sys) => {
+                    let ok = sys.confirm().is_none_or(|q| window.confirm_with_message(q).unwrap_or(false));
                     if ok {
-                        net::send("cmd restart-compositor");
+                        net::send(&format!("cmd {}", sys.wire()));
                     }
                 }
             }
@@ -507,6 +599,7 @@ impl Application for RemoteApp {
             rows,
             row_actions: Vec::new(),
             list_scroll: 0.0,
+            shown_overlay: None,
             roots: Vec::new(),
             width: 0.0,
             height: 0.0,

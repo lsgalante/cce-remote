@@ -29,6 +29,8 @@ pub enum Conn {
 pub enum Overlay {
     Switcher,
     Menu,
+    /// The menu's System list.
+    System,
 }
 
 /// A row of the window switcher: an app window from `windows --json`.

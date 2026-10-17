@@ -77,11 +77,21 @@ Two things to keep in mind when adding a message:
   `handle_ws` are `wl` and `pl`, which produce a *reply* and send fixed commands
   carrying no caller-supplied content. A new message that carries any part of the
   frame into a command belongs in `translate()`, where the tests can see it.
-- **`cmd restart-compositor` restarts the user's whole session** from a phone, behind
-  nothing but a client-side `confirm()`. Compositor-side it writes
-  `/tmp/cce-restart-requested-$USER` and exits cleanly (state is saved, and
-  `cce-display-manager`'s daemon relaunches greeter-free). Anything added to that `cmd`
-  whitelist gets the same reach.
+- **`cmd <name>` is the page's System menu, and reaches the whole session.** Each wire
+  name maps to one FIXED compositor command, matched against a literal: the focused
+  app's `restart-app` / `close` / `fullscreen`, `overview`, `screenshot`, `reload`,
+  `lock`, `idle display off`, `idle sleep`, `exit` (log out) and `restart-compositor`.
+  None takes anything from the frame — "the focused app" is the compositor's to
+  resolve, so `cmd restart-focused-app foot` is `restart-app`, never `restart-app foot`
+  — and the wire names are deliberately not the compositor's own, so a frame naming a
+  compositor command (`cmd exit`, `cmd restart-app`) is dropped. The ones that lose
+  work or drop the remote's own connection (restart app, sleep, log out, restart
+  compositor) sit behind nothing but a client-side `confirm()`; `restart-compositor`
+  writes `/tmp/cce-restart-requested-$USER` and exits cleanly (state saved,
+  `cce-display-manager`'s daemon relaunches greeter-free). Anything added to the list
+  gets the same reach. `cmd` frames run on a thread of their own, because `restart-app`
+  replies only once the app is back (up to 10s to exit) and `lock` once every output
+  shows the lock — inline, the trackpad stalled behind them.
 
 ### What the PIN does and does not buy
 
