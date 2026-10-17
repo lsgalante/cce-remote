@@ -44,8 +44,11 @@ mod winstream;
 const DEFAULT_PORT: u16 = 17017;
 
 /// How often an idle `/ws` connection checks whether a desktop text field
-/// opened or closed — the latency of the page's "tap to type" prompt.
-const FIELD_POLL: Duration = Duration::from_millis(100);
+/// opened, closed or changed — the latency of the "tap to type" prompt and of
+/// the strip's confirmation of what was typed. Short, because the strip's
+/// text waits on it: at 100ms a fast typist's strip visibly trailed. 50
+/// wakeups a second per connected phone is nothing.
+const FIELD_POLL: Duration = Duration::from_millis(20);
 
 /// How long `/click` waits for the click to open a text field before
 /// answering no. The page is frozen inside the tap for this long whenever a

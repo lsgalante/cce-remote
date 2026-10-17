@@ -10,6 +10,7 @@
 use std::cell::RefCell;
 
 use cce_ui::engine::AppSender;
+use crate::predict::{self, Edit, Field};
 use cce_ui::scene::layout::Rect;
 
 /// The app's message: the state changed, paint it.
@@ -92,11 +93,63 @@ pub struct State {
     /// The local echo of what has been typed since the keyboard came up:
     /// shown when the field does not report its contents.
     pub typed: String,
-    /// What the desktop field holds, as its app reports it (`tt`): text and
-    /// the caret's and anchor's byte offsets in it.
-    pub field_text: Option<(String, usize, usize)>,
+    /// What the desktop field holds, as its app last reported it (`tt`):
+    /// text and the caret's and anchor's byte offsets in it.
+    pub field_text: Option<Field>,
+    /// Edits typed here that the last report does not reflect yet: the strip
+    /// shows them at once (`crate::predict`), and a later report retires them.
+    pub pending: Vec<Edit>,
+    /// When the oldest pending edit was made, to give up on one the desktop
+    /// never reflects (`expire_prediction`).
+    pub pending_at: f64,
     /// Latched modifiers (evdev codes), held down on the desktop.
     pub mods: Vec<u32>,
+}
+
+/// How long a predicted edit may go unreflected before the strip stops
+/// showing it and trusts the desktop's last report.
+const PREDICTION_TTL_MS: f64 = 1500.0;
+
+impl State {
+    /// An edit typed here, toward a field that reports its contents.
+    pub fn predict(&mut self, edit: Edit) {
+        if self.field_text.is_none() {
+            return;
+        }
+        if self.pending.is_empty() {
+            self.pending_at = now_ms();
+        }
+        self.pending.push(edit);
+    }
+
+    /// A report from the desktop (`tt`): it becomes the base, and the edits
+    /// it reflects stop being pending.
+    pub fn confirm_field(&mut self, now: Option<Field>) {
+        self.pending = match (&self.field_text, &now) {
+            (Some(base), Some(n)) => predict::remaining(base, &self.pending, n),
+            _ => Vec::new(),
+        };
+        if !self.pending.is_empty() {
+            self.pending_at = now_ms();
+        }
+        self.field_text = now;
+    }
+
+    /// Drop predictions the desktop has not reflected in time. Whether
+    /// anything changed.
+    pub fn expire_prediction(&mut self) -> bool {
+        let stale = !self.pending.is_empty() && now_ms() - self.pending_at > PREDICTION_TTL_MS;
+        if stale {
+            self.pending.clear();
+        }
+        stale
+    }
+
+    /// What the strip shows for the field: the last report with the
+    /// pending edits applied.
+    pub fn shown_field(&self) -> Option<Field> {
+        self.field_text.as_ref().map(|base| predict::shown(base, &self.pending))
+    }
 }
 
 thread_local! {
@@ -129,6 +182,8 @@ pub fn init(pin: String) {
             kb_up: false,
             typed: String::new(),
             field_text: None,
+            pending: Vec::new(),
+            pending_at: 0.0,
             mods: Vec::new(),
         })
     });

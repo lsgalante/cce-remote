@@ -26,6 +26,7 @@ use web_sys::{HtmlTextAreaElement, InputEvent};
 
 use super::net;
 use super::state;
+use crate::predict::Edit;
 
 const SENTINEL: &str = "········";
 
@@ -107,6 +108,10 @@ pub fn install() {
         if is_up() && k.value() != SENTINEL {
             arm(&k);
         }
+        // A prediction the desktop never reflected gives way to its report.
+        if state::with(|s| s.expire_prediction()) {
+            state::changed();
+        }
     });
     let _ = kb.add_event_listener_with_callback("focus", focus.as_ref().unchecked_ref());
     let _ = kb.add_event_listener_with_callback("blur", blur.as_ref().unchecked_ref());
@@ -129,10 +134,13 @@ fn on_input(kind: &str, data: &str) {
             }
         }
         "insertLineBreak" => {
+            // A new line, or the field's submit: not followed.
+            predict(Edit::Opaque);
             net::send("k 28");
             state::with(|s| s.typed.clear());
         }
         "deleteContentBackward" => {
+            predict(Edit::Backspace);
             net::send("k 14");
             state::with(|s| {
                 s.typed.pop();
@@ -148,10 +156,14 @@ fn on_input(kind: &str, data: &str) {
                 n
             });
             for _ in 0..n {
+                predict(Edit::Backspace);
                 net::send("k 14");
             }
         }
-        "deleteContentForward" => net::send("k 111"),
+        "deleteContentForward" => {
+            predict(Edit::Delete);
+            net::send("k 111");
+        }
         _ => {}
     }
 }
@@ -167,8 +179,18 @@ fn word_back(typed: &str) -> &str {
     &typed[..cut.min(t.len())]
 }
 
+/// Show `edit` in the strip before the desktop reports it. With a modifier
+/// latched a key is a shortcut, not text: the prediction cannot follow it.
+pub fn predict(edit: Edit) {
+    state::with(|s| {
+        let edit = if s.mods.is_empty() { edit } else { Edit::Opaque };
+        s.predict(edit);
+    });
+}
+
 fn type_char(ch: char) {
     let Some((code, shift)) = keycode(ch) else { return };
+    predict(Edit::Insert(ch));
     if shift {
         net::send("kd 42");
         net::send(&format!("k {code}"));

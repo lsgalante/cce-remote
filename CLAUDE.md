@@ -84,9 +84,12 @@ Two things to keep in mind when adding a message:
   None takes anything from the frame — "the focused app" is the compositor's to
   resolve, so `cmd restart-focused-app foot` is `restart-app`, never `restart-app foot`
   — and the wire names are deliberately not the compositor's own, so a frame naming a
-  compositor command (`cmd exit`, `cmd restart-app`) is dropped. The ones that lose
-  work or drop the remote's own connection (restart app, sleep, log out, restart
-  compositor) sit behind nothing but a client-side `confirm()`; `restart-compositor`
+  compositor command (`cmd exit`, `cmd restart-app`) is dropped. The ones that end the
+  session or drop the remote's own connection (sleep, log out, restart compositor) sit
+  behind nothing but a client-side `confirm()`; restarting the focused app asks
+  nothing (the user's call): its windows get the compositor's close, as their close
+  buttons would, and it exits through its own `on_exit` — a cce-ui app cannot veto a
+  close, so work an app does not save there is lost; `restart-compositor`
   writes `/tmp/cce-restart-requested-$USER` and exits cleanly (state saved,
   `cce-display-manager`'s daemon relaunches greeter-free). Anything added to the list
   gets the same reach. `cmd` frames run on a thread of their own, because `restart-app`
@@ -293,7 +296,7 @@ GTK, Qt and browser fields.
   answers `unavailable`; the watcher logs that once, retries every 10s, and the bar
   simply never shows. Two `cce-remote`s on one session hit this too — the second has no
   bar.
-- **Delivery is polled, not pushed.** `handle_ws` reads with a 100ms timeout
+- **Delivery is polled, not pushed.** `handle_ws` reads with a 20ms timeout
   (`FIELD_POLL`) so its loop can send `ti 1`/`ti 0`; tungstenite keeps a frame a
   timeout split. The frames are fixed strings carrying nothing from the client, so
   `translate()` is not involved and the injection surface is unchanged.
@@ -328,7 +331,16 @@ the activation state; `textfield.rs` keeps it (`contents_since`, a change counte
 the rest of the frame, newlines included), or a bare `tt` for none. The page's strip then
 shows the field's own line around its caret, the caret and any selection where the desktop
 has them (`paint_preview`); with no contents it falls back to the echo of what the phone
-typed. Typing still goes out as keycodes; the strip updates when the app reports back.
+typed. Typing still goes out as keycodes; the strip does not wait for the app to report
+back, though — **it predicts** (`src/predict.rs`, pure and compiled natively for its
+tests): each edit typed on the phone (a character, Backspace, Delete, Left, Right) is
+shown applied to the last report at once, and a new report retires the edits it already
+reflects (the shortest prefix that turns the old text into the new). A report nothing
+explains — the app rewrote, refused or completed — is the truth and drops the guesses;
+an edit the prediction cannot follow (Enter, Up/Down, Esc/Tab, anything with a modifier
+latched) stops it there, and a guess unreflected after 1.5s gives way. Waiting for the
+round trip instead made the strip trail a fast typist visibly; `FIELD_POLL` dropped from
+100ms to 20ms for the same reason.
 **A field whose content type is a password or PIN, or hints hidden or sensitive text, is
 never passed on** (`sensitive`), whatever its app sends — cce-ui's password box reports
 nothing anyway, but GTK's and others' are only known by their content type.
@@ -425,8 +437,9 @@ The awkward part: **there is no WebSocket client on this machine** (no `websocat
 be driven from a real phone, or by writing a throwaway client.
 
 The pure functions are the exception, and they are where the crate's invariants are
-actually enforced, so they carry all the tests (`cargo test -p cce-remote`, 39 of them:
-21 in `main.rs`, 6 in `stream.rs`, 7 in `textfield.rs`, 3 in `site.rs`, 2 in `conn.rs`) —
+actually enforced, so they carry all the tests (`cargo test -p cce-remote`, 43 of them:
+21 in `main.rs`, 6 in `stream.rs`, 7 in `textfield.rs`, 3 in `site.rs`, 2 in `conn.rs`,
+4 in `predict.rs`) —
 `translate()` for what a paired client may say, the three PIN gates for who is paired
 at all, in `stream.rs` the `Slot`'s latest-wins semantics plus `adapt()`/`LADDER`, in
 `textfield.rs` the field-switch grace (`decide`), the click's activation wait

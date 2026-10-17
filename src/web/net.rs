@@ -92,7 +92,7 @@ pub fn connect() {
             s.conn = Conn::Off;
             // The reconnect repeats `ti 1` if the field is still open.
             s.field_open = false;
-            s.field_text = None;
+            s.confirm_field(None);
         });
         state::changed();
         set_timeout(1000, connect);
@@ -132,7 +132,7 @@ fn on_input_message(text: &str) {
         super::kb::set_field(text == "ti 1");
         return;
     } else if let Some(rest) = text.strip_prefix("tt") {
-        state::with(|s| s.field_text = parse_contents(rest));
+        state::with(|s| s.confirm_field(parse_contents(rest)));
     } else if let Some(json) = text.strip_prefix("windows ") {
         if !on_windows(json) {
             return;

@@ -25,6 +25,7 @@ use cce_ui::widget::{Adapted, Button, ElementState, Event, Handle, KeyEvent, Mou
 use super::icons::icon;
 use super::state::{self, Conn, Msg, Overlay};
 use super::{kb, net, pad};
+use crate::predict::Edit;
 
 /// A key or button row's height: a comfortable thumb target.
 const BTN_H: f32 = 40.0;
@@ -117,7 +118,7 @@ impl Sys {
 
     fn label(self) -> &'static str {
         match self {
-            Sys::RestartApp => "Restart focused app…",
+            Sys::RestartApp => "Restart focused app",
             Sys::CloseFocused => "Close focused window",
             Sys::Fullscreen => "Toggle fullscreen",
             Sys::Overview => "Overview",
@@ -131,11 +132,13 @@ impl Sys {
         }
     }
 
-    /// Asked before the action (the `…` in its label): the ones that lose
-    /// work or drop the remote's own connection.
+    /// Asked before the action (the `…` in its label): the ones that end
+    /// the session or drop the remote's own connection. Restarting an app is
+    /// not one, by the user's choice: its windows get the compositor's close,
+    /// as their close buttons would, and it exits through its own `on_exit`
+    /// (where notes saves, and spreadsheet keeps a recovery copy).
     fn confirm(self) -> Option<&'static str> {
         Some(match self {
-            Sys::RestartApp => "Restart the focused app? Its windows close and it starts again; unsaved work in it may be lost.",
             Sys::Sleep => "Put the computer to sleep? The remote disconnects until it wakes.",
             Sys::LogOut => "Log out? Every app closes and the session ends, the remote with it.",
             Sys::RestartCompositor => "Restart the compositor? Every app in the session will close, then the session relaunches.",
@@ -345,7 +348,16 @@ impl RemoteApp {
 
         for act in acts {
             match act {
-                Action::Key(code) => net::send(&format!("k {code}")),
+                Action::Key(code) => {
+                    // The arrows the strip can follow on one line; the rest
+                    // (Esc, Tab, Up, Down) it cannot.
+                    kb::predict(match code {
+                        105 => Edit::Left,
+                        106 => Edit::Right,
+                        _ => Edit::Opaque,
+                    });
+                    net::send(&format!("k {code}"));
+                }
                 Action::Mod(code) => {
                     let on = state::with(|s| {
                         let on = !s.mods.contains(&code);
@@ -472,7 +484,7 @@ impl RemoteApp {
         pc.canvas_well(r, radius, &Material::pane(), cce_ui::layout::control_relief(), false);
         let (family, size) = label_font();
         let inset = cce_ui::layout::plate_padding();
-        let (typed, field) = state::with(|s| (s.typed.clone(), s.field_text.clone()));
+        let (typed, field) = state::with(|s| (s.typed.clone(), s.shown_field()));
         let caret_w = 2.0;
         let text_r = Rect { x: r.x + inset, y: r.y, width: r.width - 2.0 * inset - caret_w - 1.0, height: r.height };
         // What the strip shows: the desktop field's own line around its
