@@ -16,19 +16,34 @@ const note = (text) => {
 // An on-screen keyboard covers the page rather than resizing it (iOS):
 // follow the visual viewport, so the canvas ends where the keyboard begins
 // and the trackpad shrinks to stay whole above it.
+//
+// Opened from the home screen (navigator.standalone), iOS sizes the viewport
+// as if the status bar took room although the page starts under it: 873 of
+// a 932px screen, the last 59 (the status bar's height) bare page. There
+// the canvas is the screen's height rather than the viewport's (--app-h).
 const vv = window.visualViewport;
+const fit = () => {
+  // A few px of difference is the viewport's rounding, not a keyboard
+  // (none is that short): read as one, it left a sliver of bare page.
+  const gap = vv ? window.innerHeight - vv.height - vv.offsetTop : 0;
+  const kb = gap > 80 ? gap : 0;
+  const root = document.documentElement.style;
+  root.setProperty('--kb', kb + 'px');
+  const portrait = window.innerHeight >= window.innerWidth;
+  const screenH = portrait ? Math.max(screen.width, screen.height) : Math.min(screen.width, screen.height);
+  if (navigator.standalone && !kb && screenH > window.innerHeight) {
+    root.setProperty('--app-h', screenH + 'px');
+  } else {
+    root.removeProperty('--app-h');
+  }
+  if (window.scrollY) window.scrollTo(0, 0);
+};
+fit();
 if (vv) {
-  const fit = () => {
-    // A few px of difference is the viewport's rounding, not a keyboard
-    // (none is that short): read as one, it left a sliver of bare page.
-    const gap = window.innerHeight - vv.height - vv.offsetTop;
-    const kb = gap > 80 ? gap : 0;
-    document.documentElement.style.setProperty('--kb', kb + 'px');
-    if (window.scrollY) window.scrollTo(0, 0);
-  };
   vv.addEventListener('resize', fit);
   vv.addEventListener('scroll', fit);
 }
+window.addEventListener('resize', fit);
 
 const askPin = (msg) => {
   const pin = window.prompt(msg || 'cce-remote pairing PIN (shown in the server log):');

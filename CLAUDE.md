@@ -380,6 +380,14 @@ the layout adds inside: stacked, the two left a band under the click buttons), s
 root plate reaches the edges and the controls end at the safe areas' lines. With the keyboard up the canvas
 ends at the keyboard, and the bottom inset is dropped.
 
+**Opened from the home screen, iOS sizes the viewport short.** With `navigator.standalone`
+(the meta-tag web app; no manifest, so `display-mode: standalone` is false) the page
+starts under the status bar but its viewport is sized as if the bar took room: measured
+on an iPhone, iOS 26, a 932px screen gave `innerHeight` 873, and a canvas sized by the
+viewport left the bottom 59px bare. There `app.js` sets `--app-h` to the screen's height
+(keyboard down); `100lvh` is also 932 there, but in a Safari tab it would run under the
+toolbar, so it is not used.
+
 **The app paints; it does not read the pad or the keyboard.** cce-ui's browser shell
 follows one finger and reads it as a touchscreen does (tap, scroll, held drag), and its
 keyboard sink lacks the iOS Backspace fix, so:

@@ -19,8 +19,8 @@
      safe_insets), so its plate reaches the screen's edges. */
   #app {
     position: fixed;
-    top: 0; right: 0; bottom: var(--kb, 0px); left: 0;
-    width: 100%; height: calc(100% - var(--kb, 0px));
+    top: 0; right: 0; left: 0;
+    width: 100%; height: var(--app-h, calc(100% - var(--kb, 0px)));
     display: block; touch-action: none; -webkit-user-select: none; user-select: none;
   }
   /* The safe areas, as padding the app can read. */
