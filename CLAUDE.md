@@ -387,7 +387,9 @@ gave `innerHeight` 873, and **nothing is drawn below it** — a canvas sized to 
 (`100lvh` is 932 there) was cut off 59px above the bottom, where the screen's corners
 start. A manifest does not help (apps with `display: standalone` report the same). The
 workaround others measured (iOS 26.2 simulator) is the document's own height:
-`html[data-standalone] { height: 100vh }` (index.html; `app.js` sets the attribute).
+`html[data-standalone] { height: 100vh }` (index.html; `app.js` sets the attribute). It
+works: confirmed on the iPhone (iOS 26, 2026-10-17), the app reaching the screen's
+bottom with the keyboard down and up.
 Where it fails, the page behind is painted the root plate's colour (`mod.rs`,
 `match_page_to_plate`) and `app.js` sets `--safe-b: 0px`, so the bottom safe area, which
 lies in the bare band, is not kept clear. That app's viewport shrinks with the keyboard
