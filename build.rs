@@ -19,8 +19,8 @@
 //!
 //! This script runs for the nested build too; on wasm32 it does nothing.
 //! `CCE_REMOTE_SKIP_WEB=1` skips the page entirely (empty placeholders), for
-//! a machine without the wasm toolchain: the server then serves only the
-//! classic page.
+//! a machine without the wasm toolchain: the server then has no page (its
+//! sockets and debug endpoints still work).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -40,7 +40,7 @@ fn main() {
     let site = out.join("site");
     std::fs::create_dir_all(&site).unwrap();
     if std::env::var("CCE_REMOTE_SKIP_WEB").is_ok_and(|v| v == "1") {
-        println!("cargo:warning=CCE_REMOTE_SKIP_WEB=1: building without the cce-ui page; only /classic will be served");
+        println!("cargo:warning=CCE_REMOTE_SKIP_WEB=1: building without the cce-ui page; `/` will say so");
         for f in ["cce_remote.js", "cce_remote_bg.wasm", "cce_remote_bg.wasm.gz"] {
             std::fs::write(site.join(f), b"").unwrap();
         }

@@ -1,9 +1,9 @@
 //! One accepted connection, plain or TLS, on the same port.
 //!
 //! The first byte decides: a TLS ClientHello begins with 0x16, which no HTTP
-//! request does. So `https://` and `http://` share the port, and the classic
-//! page keeps working at its old plain-HTTP address while the cce-ui app
-//! (which needs a secure page) is served over TLS (`tls.rs`).
+//! request does. So `https://` and `http://` share the port: the page needs
+//! TLS (`tls.rs`), and plain HTTP still serves the debug endpoints and tells a
+//! browser where to go.
 //!
 //! The request head is read before anyone knows what the request is — a TLS
 //! stream cannot be peeked the way a socket can — and kept for replay: reads

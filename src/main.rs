@@ -1,8 +1,8 @@
 //! cce-remote — use a phone as a trackpad + keyboard for the cce desktop.
 //!
 //! One small server, no GUI: it serves the embedded page (a cce-ui app built
-//! for the browser, `src/web`, with the hand-written `classic.html` as its
-//! fallback; see `site.rs`) over HTTP on the tailnet (see `reachable`), accepts a WebSocket at
+//! for the browser, `src/web`; see `site.rs`) over HTTP and HTTPS on the
+//! tailnet (see `reachable`, `conn.rs`), accepts a WebSocket at
 //! `/ws`, and translates the page's compact input events into the
 //! compositor's line-oriented control socket (`/tmp/cce-{WAYLAND_DISPLAY}.sock`
 //! — the same channel `ccectl` uses, so injection goes through the real

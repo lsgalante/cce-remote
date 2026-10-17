@@ -58,7 +58,6 @@ enum Row {
     Window(u64),
     ToggleView,
     Reload,
-    Classic,
     Restart,
 }
 
@@ -194,7 +193,7 @@ impl RemoteApp {
         self.row_actions = match overlay {
             None => Vec::new(),
             Some(Overlay::Switcher) => state::with(|s| s.windows.iter().map(|w| Row::Window(w.id)).take(ROWS).collect()),
-            Some(Overlay::Menu) => vec![Row::ToggleView, Row::Reload, Row::Classic, Row::Restart],
+            Some(Overlay::Menu) => vec![Row::ToggleView, Row::Reload, Row::Restart],
         };
         let (view, windows) = state::with(|s| (s.view, s.windows.clone()));
         let inner = cce_ui::layout::plate_padding();
@@ -218,7 +217,6 @@ impl RemoteApp {
                 }
                 Row::ToggleView => ((if view { "Switch to trackpad" } else { "Show focused window (live view)" }).to_string(), false),
                 Row::Reload => ("Reload page".to_string(), false),
-                Row::Classic => ("Use the classic page".to_string(), false),
                 Row::Restart => ("Restart compositor…".to_string(), false),
             };
             ui[*h].set_label(&label);
@@ -303,9 +301,6 @@ impl RemoteApp {
                 Row::ToggleView => Self::set_view(!state::with(|s| s.view)),
                 Row::Reload => {
                     let _ = window.location().reload();
-                }
-                Row::Classic => {
-                    let _ = window.location().set_href("/classic");
                 }
                 Row::Restart => {
                     let ok = window

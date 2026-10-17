@@ -9,8 +9,8 @@ uses, so injection rides the real compositor input path.
 
 The page is a cce-ui app compiled to WebAssembly, so it looks like the
 desktop (its colours and font come from the DE's config). It draws with
-WebGPU — on an iPhone that means iOS 26 or later; a browser without it is
-sent to `/classic`, the plain HTML page the app replaced.
+WebGPU — on an iPhone that means iOS 26 or later — and only on a page served
+over HTTPS (see below).
 
 ## Run
 
@@ -24,12 +24,12 @@ cce-remote          # serves loopback + the tailnet on :17017 (or: cce-remote <p
 cce-remote --lan    # every interface, plain HTTP (or CCE_REMOTE_LAN=1)
 ```
 
-Open `http://<this-machine's-Tailscale-address>:17017` on the phone (its
-100.x address or MagicDNS name). Add it to the Home Screen for a fullscreen
-app feel. A connection from anywhere else gets a 403 saying so.
+Only connections over the tailnet (or loopback) are served; anything else
+gets a 403 saying so. Add the page to the Home Screen for a fullscreen app
+feel.
 
-The cce-ui page needs HTTPS (a browser offers WebGPU only on a secure page;
-over plain HTTP you get the classic page). Point a DNS name you control at
+The page needs HTTPS (a browser offers WebGPU only on a secure page; over
+plain HTTP you get a note saying so). Point a DNS name you control at
 the machine's tailnet address, then, with a Cloudflare API token for that
 zone (Zone:DNS:Edit) in `~/.config/cce/cloudflare-dns.token`:
 
@@ -38,8 +38,8 @@ cce-remote-cert remote.example.com                 # Let's Encrypt via DNS; need
 systemctl --user enable --now cce-remote-cert.timer   # renews it
 ```
 
-and open `https://remote.example.com:17017`. The same port keeps serving
-plain HTTP, and a renewed certificate is picked up without a restart.
+and open `https://remote.example.com:17017`. A renewed certificate is
+picked up without a restart.
 
 ## Controls
 

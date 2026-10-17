@@ -16,8 +16,9 @@ one package:
   control socket out.
 - **The page** (the library, `src/web`) — a **cce-ui app run in the phone's browser**
   (WebGPU on a `<canvas>`, since 2026-10-17), compiled to wasm by `build.rs` and
-  embedded in the server binary. The hand-written page it replaced is kept as
-  `classic.html`, the fallback for a browser without WebGPU.
+  embedded in the server binary. It replaced a hand-written vanilla-JS `index.html`,
+  which was kept as a `/classic` fallback until the app was confirmed on the iPhone and
+  then deleted (2026-10-17); `git log -- classic.html` has it.
 
 So the server half has no `Application` trait, no `Message` enum and no widget tree —
 mirroring a sibling app's structure is the wrong instinct there — and the page half has
@@ -153,11 +154,11 @@ network.
 ### HTTPS: the same port, by the first byte
 
 The cce-ui page needs a **secure page** — WebGPU does not exist on plain `http://`, so
-there the loader can only send the phone to `/classic`. So the server also speaks TLS
+there the loader can only show a note saying so. So the server also speaks TLS
 on its own port (since 2026-10-17): `Conn::accept` peeks the first byte, and a TLS
 ClientHello (0x16, which no HTTP request starts with) gets a rustls session while
-anything else stays plain. The classic page keeps its plain-HTTP address; the app is
-at `https://<name>:17017/`. The tailnet gate (`reachable`) runs before either, on the
+anything else stays plain (the debug endpoints, and that note). The page is at
+`https://<name>:17017/`. The tailnet gate (`reachable`) runs before either, on the
 raw socket, unchanged.
 
 - **The certificate is Let's Encrypt's, proven over DNS**: `scripts/cce-remote-cert`
@@ -178,7 +179,7 @@ raw socket, unchanged.
   handshake and the head — a client that connects and sends nothing no longer holds a
   thread forever, as the old blocking `peek` let it.
 - Pages use `wss://` on an https page and `ws://` otherwise (a browser refuses a plain
-  socket from a secure page): `net::url` in the app, `WS` in `classic.html`.
+  socket from a secure page): `net::url`.
 
 ## Framing: the control socket is one-shot
 
@@ -188,8 +189,7 @@ read → reply → close. An earlier version held one persistent stream and sile
 reconnects, dropping commands; reading to EOF is also what makes multi-line replies like
 `windows --json` work at all.
 
-The page therefore does the coalescing: `queue_flush` (`pad.rs`; `queueFlush()` in the
-classic page) batches pointer deltas on a 12ms timer so a fast drag becomes ~80 commands/sec, not one per touch event. One thread is
+The page therefore does the coalescing: `queue_flush` (`pad.rs`) batches pointer deltas on a 12ms timer so a fast drag becomes ~80 commands/sec, not one per touch event. One thread is
 spawned per accepted connection, uncapped, and a `/stream` connection holds its thread
 for the life of the stream.
 
@@ -209,8 +209,8 @@ The delivery design (`stream.rs`) makes that failure structurally impossible:
   first-frame gate): the server sends one frame, the page renders it and acks `n`, and
   only then does the newest frame go out. **At most one frame is ever in flight**, so a
   degraded link costs frame *rate*, never accumulating latency. The ack is sent once
-  the frame is *painted* (`net::ack_painted`, from the app's `display_list`; after
-  `drawImage` in the classic page), not on receipt — so the measured send→ack time
+  the frame is *painted* (`net::ack_painted`, from the app's `display_list`), not on
+  receipt — so the measured send→ack time
   covers network + decode + paint, which is what the user experiences.
 - That measurement drives an **adaptation ladder** (`LADDER`/`adapt()`): resolution up
   to 1400px edge when the link is fast, downgrades immediate, upgrades requiring
@@ -324,15 +324,15 @@ and the same assumption `grim` ran under. Multi-output would need a real mapping
 
 The cursor ring maps the other way: from the pointer's layout position, through the
 focused window's rect, into the frame's contain-fit in the pad, then through the
-pinch's zoom and pan (`paint_pad`; `placeMarker` in the classic page, where the zoom is
-a uniform CSS transform that `getBoundingClientRect()` already reflects). (Tap-to-spot
+pinch's zoom and pan (`paint_pad`). (Tap-to-spot
 mapping is gone: view-mode input is trackpad-identical — taps click where the cursor is.)
 
 ## The page: a cce-ui app in the browser
 
 The phone loads `/` — **over HTTPS** (see "HTTPS" above): `web/index.html` (a full-page canvas, the keyboard's textarea) and
-its loader `web/app.js`, which checks for WebGPU — **none, and it goes to `/classic`**,
-since cce-ui draws with nothing else (an iPhone needs iOS 26) — then asks for the PIN
+its loader `web/app.js`, which checks for WebGPU — **none, and it shows a note** (over
+plain HTTP: open it over HTTPS; on a secure page: the browser lacks WebGPU — an iPhone
+needs iOS 26), since cce-ui draws with nothing else — then asks for the PIN
 if it has none, fetches `/boot` (the font list), `/config` and the fonts, all behind
 the PIN, and starts the app. Everything after `start()` is Rust.
 
@@ -341,7 +341,8 @@ follows one finger and reads it as a touchscreen does (tap, scroll, held drag), 
 keyboard sink lacks the iOS Backspace fix, so:
 
 - **`pad.rs` owns the trackpad's touches.** It reads the page's touch events itself (all
-  fingers, relative motion, the same gestures and constants as the classic page), and a
+  fingers, relative motion, the same gestures and constants as the hand-written page
+  had), and a
   capture-phase pointer listener on the window **stops the matching pointer events
   before cce-ui's canvas listeners see them**. Which touches are the pad's is decided by
   position against the rects the app publishes in `state` (`pad`, `overlay_rect`) —
@@ -357,7 +358,7 @@ keyboard sink lacks the iOS Backspace fix, so:
   inside `state::with`: focusing the textarea raises `focus` synchronously, its listener
   takes the state again, and the nested borrow panics.
 
-What carried over from the classic page, and must not be "cleaned up":
+What carried over from the hand-written page, and must not be "cleaned up":
 
 - **The hidden textarea keeps sentinel padding** (`········`, cursor at the end, re-armed
   on focus plus a 1s drift-repair timer). iOS never fires `deleteContentBackward` on an
@@ -391,17 +392,6 @@ the wasm (~1.7 MB gzipped, served with `Content-Encoding: gzip`) are fetched und
 `?v=<version>` and marked immutable, so a phone downloads the app once per server build.
 The `ver` frame after pairing reloads a page whose server has restarted onto new code,
 as before.
-
-## `classic.html`: the fallback
-
-The hand-written vanilla-JS page that was the whole UI until 2026-10-17, unchanged
-apart from its name, served at `/classic` (and at `/` by a server built without the
-app). It speaks the same protocol, so it keeps working; its scar tissue — the sentinel
-textarea, the zoom transform on `#screenwrap` (uniform, so `getBoundingClientRect`
-reflects it), the `overflow: hidden` clip on the non-transformed `#pad` — is documented
-in its own comments. Its glyphs are cce-icons SVGs inlined with `#ffffff` swapped for
-`currentColor`. Keep it working while the app is new; retire it once the app has
-proven itself on the phone.
 
 `SCROLL = 0.8`, not the 0.045 it started as: axis values reach clients as surface-px
 deltas, so near-unity is the trackpad-like 1:1 feel. A 300px swipe used to scroll one line.
@@ -494,7 +484,8 @@ crate's; the standalone lock was seeded from the workspace's to keep them equal 
 `cargo update` would move it to whatever is newest and break the build until the CLI
 follows). A change to cce-ui itself does not rerun `build.rs`; touch `src/web` to pick it
 up. `CCE_REMOTE_SKIP_WEB=1` builds the server without the app (empty placeholders), for
-a machine without the toolchain: `/` then serves the classic page.
+a machine without the toolchain: `/` then only says the page is missing (the sockets
+and debug endpoints still work).
 
 **Committing is not publishing — pushing is.** This directory is its own git repository
 whose `origin` is GitHub (`https://github.com/lsgalante/cce-remote.git`), and a
@@ -527,7 +518,7 @@ service on a replaced binary, including ones another session has installed but i
 ready to restart (WORKSPACE.md, "Concurrent sessions"). The scoped form reaches this
 service because `cce-remote.service` ships from this crate root, and among those units
 it restarts only the ones whose `/proc/<pid>/exe` reads `(deleted)`; `--all` restarts
-them regardless. Editing the page (`src/web`, `web/`, `classic.html`) counts as a code
+them regardless. Editing the page (`src/web`, `web/`) counts as a code
 change for this purpose — it is embedded, so the page only updates once the binary is
 rebuilt, reinstalled *and* the service restarted.
 

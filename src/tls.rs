@@ -1,6 +1,6 @@
 //! HTTPS on the remote's own port, for the page: WebGPU — which the cce-ui
 //! app draws with — exists only on a secure page, so over plain HTTP a phone
-//! gets the classic page and nothing else.
+//! gets only a note saying to come back over HTTPS.
 //!
 //! The certificate is lego's (`cce-remote-cert`, renewed by
 //! `cce-remote-cert.timer`): a Let's Encrypt certificate for a name that

@@ -1,12 +1,9 @@
 //! What the server hands a browser besides the sockets: the pages, the
 //! page's code, and the DE's look (its config and fonts).
 //!
-//! **Two pages.** `/` is the cce-ui app (`src/web`, built for the browser by
-//! `build.rs` and embedded here); `/classic` is the hand-written page it
-//! replaced, kept as the fallback for a browser without WebGPU — the loader
-//! (`web/app.js`) sends those there, and the app's menu links to it. A
-//! server built with `CCE_REMOTE_SKIP_WEB=1` has no app, and serves the
-//! classic page at `/` too.
+//! **The page.** `/` is the cce-ui app (`src/web`, built for the browser by
+//! `build.rs` and embedded here). A server built with `CCE_REMOTE_SKIP_WEB=1`
+//! has none, and `/` says so.
 //!
 //! **Caching.** The loader and the app's code are served at fixed paths
 //! carrying `?v=<version>` and marked immutable, and `/` names the current
@@ -23,7 +20,6 @@
 use std::borrow::Cow;
 use std::path::PathBuf;
 
-pub const CLASSIC: &str = include_str!("../classic.html");
 const INDEX: &str = include_str!("../web/index.html");
 const LOADER: &str = include_str!("../web/app.js");
 const GLUE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/site/cce_remote.js"));
@@ -49,7 +45,7 @@ pub fn version() -> &'static str {
     static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     V.get_or_init(|| {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        for part in [CLASSIC.as_bytes(), INDEX.as_bytes(), LOADER.as_bytes(), GLUE, WASM] {
+        for part in [INDEX.as_bytes(), LOADER.as_bytes(), GLUE, WASM] {
             for &b in part {
                 h ^= b as u64;
                 h = h.wrapping_mul(0x0000_0100_0000_01b3);
@@ -75,7 +71,11 @@ pub fn asset(path: &str, accepts_gzip: bool) -> Option<Reply> {
     let js = |body: &'static [u8]| Reply { ctype: "text/javascript; charset=utf-8", headers: IMMUTABLE.into(), body: Cow::Borrowed(body) };
     Some(match path {
         "/" | "/index.html" if built() => html(INDEX.replace("__V__", version())),
-        "/" | "/index.html" | "/classic" => Reply { body: Cow::Borrowed(CLASSIC.as_bytes()), ..html(String::new()) },
+        "/" | "/index.html" => Reply {
+            ctype: "text/plain; charset=utf-8",
+            headers: NO_CACHE.into(),
+            body: Cow::Borrowed(b"cce-remote was built without its page (CCE_REMOTE_SKIP_WEB=1).\n"),
+        },
         "/app.js" if built() => js(LOADER.as_bytes()),
         "/cce_remote.js" if built() => js(GLUE),
         "/cce_remote_bg.wasm" if built() => {
@@ -241,7 +241,6 @@ mod tests {
         assert_eq!(wasm.ctype, "application/wasm");
         assert!(wasm.headers.contains("immutable") && wasm.headers.contains("gzip"));
         assert!(!asset("/cce_remote_bg.wasm", false).unwrap().headers.contains("gzip"));
-        assert!(asset("/classic", true).is_some());
         assert!(asset("/nope", true).is_none());
     }
 }

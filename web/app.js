@@ -1,4 +1,4 @@
-// The page's start-up: WebGPU or the classic page, the pairing PIN, the
+// The page's start-up: WebGPU (or a note why not), the pairing PIN, the
 // DE's config and fonts, then the app (src/web, bound by wasm-bindgen as
 // cce_remote.js). Everything after start() is the app's.
 
@@ -58,8 +58,11 @@ async function boot() {
 
 const adapter = navigator.gpu && await navigator.gpu.requestAdapter().catch(() => null);
 if (!adapter) {
-  // No WebGPU (cce-ui draws with nothing else): the hand-written page.
-  location.replace('/classic');
+  // cce-ui draws with nothing else. Over plain HTTP the browser hides WebGPU
+  // altogether — the usual reason, and the one worth spelling out.
+  note(window.isSecureContext
+    ? 'The remote draws with WebGPU, which this browser does not offer. On an iPhone it needs iOS 26 or later.'
+    : 'Open the remote over HTTPS: a browser offers WebGPU, which it draws with, only on a secure page.');
 } else {
   try {
     const got = await boot();
@@ -81,6 +84,6 @@ if (!adapter) {
     }
   } catch (e) {
     console.error(e);
-    note('The remote failed to start: ' + e + '\n\nThe classic page is at /classic.');
+    note('The remote failed to start: ' + e);
   }
 }
