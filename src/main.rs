@@ -465,8 +465,10 @@ fn handle_ws(stream: Conn, pin: &str, ip: std::net::IpAddr, limiter: &RateLimite
     let _ = ws.send(tungstenite::Message::Text("auth ok".into()));
     let _ = ws.send(tungstenite::Message::Text(format!("ver {}", site::version())));
     println!("[cce-remote] client connected: {peer}");
-    // What this page was last told; a fresh page assumes no field is open.
+    // What this page was last told; a fresh page assumes no field is open,
+    // and has seen no contents.
     let mut field_sent = false;
+    let mut contents_seen = 0u64;
     loop {
         let msg = match ws.read() {
             Ok(msg) => Some(msg),
@@ -484,6 +486,20 @@ fn handle_ws(stream: Conn, pin: &str, ip: std::net::IpAddr, limiter: &RateLimite
                 break;
             }
             field_sent = open;
+        }
+        // The field's contents, for the page's echo strip: `tt <cursor>
+        // <anchor> <text>` (byte offsets; the text is the rest of the frame,
+        // spaces and newlines included), or a bare `tt` for none. Outbound
+        // only — nothing here reaches the control socket.
+        if let Some((seen, contents)) = textfield::contents_since(contents_seen) {
+            let frame = match contents {
+                Some(c) => format!("tt {} {} {}", c.cursor, c.anchor, c.text),
+                None => "tt".to_string(),
+            };
+            if ws.send(tungstenite::Message::Text(frame)).is_err() {
+                break;
+            }
+            contents_seen = seen;
         }
         if let Some(tungstenite::Message::Text(text)) = msg {
             if text.trim() == "wl" {

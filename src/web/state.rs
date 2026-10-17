@@ -87,8 +87,12 @@ pub struct State {
     /// a tap's `/click`), so a closing field may drop it.
     pub kb_by_field: bool,
     pub kb_up: bool,
-    /// The local echo of what has been typed since the keyboard came up.
+    /// The local echo of what has been typed since the keyboard came up:
+    /// shown when the field does not report its contents.
     pub typed: String,
+    /// What the desktop field holds, as its app reports it (`tt`): text and
+    /// the caret's and anchor's byte offsets in it.
+    pub field_text: Option<(String, usize, usize)>,
     /// Latched modifiers (evdev codes), held down on the desktop.
     pub mods: Vec<u32>,
 }
@@ -122,6 +126,7 @@ pub fn init(pin: String) {
             kb_by_field: false,
             kb_up: false,
             typed: String::new(),
+            field_text: None,
             mods: Vec::new(),
         })
     });

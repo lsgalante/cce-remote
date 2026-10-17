@@ -380,23 +380,39 @@ impl RemoteApp {
         pc.canvas_well(r, radius, &Material::pane(), cce_ui::layout::control_relief(), false);
         let (family, size) = label_font();
         let inset = cce_ui::layout::plate_padding();
-        let typed = state::with(|s| s.typed.clone());
+        let (typed, field) = state::with(|s| (s.typed.clone(), s.field_text.clone()));
         let caret_w = 2.0;
         let text_r = Rect { x: r.x + inset, y: r.y, width: r.width - 2.0 * inset - caret_w - 1.0, height: r.height };
-        // Grows from the left like a field, the caret just after the text;
-        // once it is full, only the tail that fits, so the newest typing
-        // stays in view. Spaces are measured as `_` (the measure trims
-        // them, and the DE's face is monospace).
-        let width = |t: &str| cce_ui::widget::display::measure_text_width(&t.replace(' ', "_"), &family, size);
-        let mut tail: Vec<char> = typed.chars().collect();
-        while !tail.is_empty() && width(&tail.iter().collect::<String>()) > text_r.width {
-            tail.remove(0);
+        // What the strip shows: the desktop field's own line around its
+        // caret when the app reports its contents, else the local echo of
+        // what was typed here (caret at its end).
+        let (line, caret, anchor) = match &field {
+            Some((text, cursor, anchor)) => {
+                let start = text[..*cursor].rfind('\n').map_or(0, |i| i + 1);
+                let end = text[*cursor..].find('\n').map_or(text.len(), |i| cursor + i);
+                (text[start..end].to_string(), cursor - start, (*anchor).clamp(start, end) - start)
+            }
+            None => (typed.clone(), typed.len(), typed.len()),
+        };
+        // From the left like a field; when the caret would fall past the
+        // right edge, the line starts later, so the caret stays in view.
+        // Spaces are measured as `_` (the measure trims them, and the DE's
+        // face is monospace).
+        let width = |t: &str| if t.is_empty() { 0.0 } else { cce_ui::widget::display::measure_text_width(&t.replace(' ', "_"), &family, size) };
+        let mut from = 0;
+        while from < caret && width(&line[from..caret]) > text_r.width {
+            from += line[from..].chars().next().map_or(1, char::len_utf8);
         }
-        let tail: String = tail.into_iter().collect();
-        let tail_w = if tail.is_empty() { 0.0 } else { width(&tail) };
-        if !tail.is_empty() {
+        let x_at = |i: usize| text_r.x + width(&line[from..i.max(from)]);
+        let ch = size * 1.1;
+        let cy = r.y + (r.height - ch) / 2.0;
+        if anchor != caret {
+            let (a, b) = (x_at(anchor.min(caret)), x_at(anchor.max(caret)).min(text_r.x + text_r.width));
+            pc.quad(Rect { x: a, y: cy, width: (b - a).max(0.0), height: ch }, [RING[0], RING[1], RING[2], 0.3]);
+        }
+        if from < line.len() {
             pc.text_boxed(
-                tail,
+                line[from..].to_string(),
                 text_r.x,
                 text_r.y,
                 size,
@@ -407,9 +423,7 @@ impl RemoteApp {
                 TextLayout { wrap_width: None, box_height: text_r.height, align_h: AlignH::Left, align_v: AlignV::Middle },
             );
         }
-        let cx = text_r.x + tail_w + 1.0;
-        let ch = size * 1.1;
-        pc.quad(Rect { x: cx, y: r.y + (r.height - ch) / 2.0, width: caret_w, height: ch }, RING);
+        pc.quad(Rect { x: x_at(caret) + 1.0, y: cy, width: caret_w, height: ch }, RING);
     }
 
     fn paint_overlay(&self, pc: &mut PaintCtx, o: Rect) {

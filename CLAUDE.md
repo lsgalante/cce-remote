@@ -310,10 +310,22 @@ GTK, Qt and browser fields.
 - A close blurs the keyboard **only if a field raised it** (the bar or `/click`); one
   opened with the keyboard button stays, as `osk.rs` leaves a hand-summoned board.
 
+**The field's contents reach the phone too** (since 2026-10-17). An app that reports its
+surrounding text — cce-ui's `TextBox` and `DocEditor` (cce-ui `bfafde0` and later; an app
+shows it once rebuilt against that), GTK, Qt, browsers — has the compositor relay it with
+the activation state; `textfield.rs` keeps it (`contents_since`, a change counter) and
+`handle_ws` sends each change as `tt <cursor> <anchor> <text>` (byte offsets; the text is
+the rest of the frame, newlines included), or a bare `tt` for none. The page's strip then
+shows the field's own line around its caret, the caret and any selection where the desktop
+has them (`paint_preview`); with no contents it falls back to the echo of what the phone
+typed. Typing still goes out as keycodes; the strip updates when the app reports back.
+**A field whose content type is a password or PIN, or hints hidden or sensitive text, is
+never passed on** (`sensitive`), whatever its app sends — cce-ui's password box reports
+nothing anyway, but GTK's and others' are only known by their content type.
+
 Not done, and why: `commit_string` would type Unicode the keycode table cannot, but it
 travels on the Wayland connection while Backspace/Enter go through the control socket,
-and the two can reorder. Field *contents* on the phone need `surrounding_text`, which
-cce-ui does not send yet (a shared-crate change).
+and the two can reorder.
 
 ## Geometry assumes one output at 0,0
 
@@ -403,12 +415,12 @@ The awkward part: **there is no WebSocket client on this machine** (no `websocat
 be driven from a real phone, or by writing a throwaway client.
 
 The pure functions are the exception, and they are where the crate's invariants are
-actually enforced, so they carry all the tests (`cargo test -p cce-remote`, 37 of them:
-21 in `main.rs`, 6 in `stream.rs`, 5 in `textfield.rs`, 3 in `site.rs`, 2 in `conn.rs`) —
+actually enforced, so they carry all the tests (`cargo test -p cce-remote`, 39 of them:
+21 in `main.rs`, 6 in `stream.rs`, 7 in `textfield.rs`, 3 in `site.rs`, 2 in `conn.rs`) —
 `translate()` for what a paired client may say, the three PIN gates for who is paired
 at all, in `stream.rs` the `Slot`'s latest-wins semantics plus `adapt()`/`LADDER`, in
-`textfield.rs` the field-switch grace (`decide`) and the click's activation wait
-(`wait_opened`), in `site.rs` the font resolution and the caching headers, and in
+`textfield.rs` the field-switch grace (`decide`), the click's activation wait
+(`wait_opened`), the contents' change counter and the sensitive-field rule, in `site.rs` the font resolution and the caching headers, and in
 `conn.rs` the head replay. They
 cover the accepted shapes and — more to the point — everything that
 must be refused: unknown verbs *including the compositor's own command names*,

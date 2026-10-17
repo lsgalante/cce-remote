@@ -92,6 +92,7 @@ pub fn connect() {
             s.conn = Conn::Off;
             // The reconnect repeats `ti 1` if the field is still open.
             s.field_open = false;
+            s.field_text = None;
         });
         state::changed();
         set_timeout(1000, connect);
@@ -130,6 +131,8 @@ fn on_input_message(text: &str) {
     } else if text == "ti 1" || text == "ti 0" {
         super::kb::set_field(text == "ti 1");
         return;
+    } else if let Some(rest) = text.strip_prefix("tt") {
+        state::with(|s| s.field_text = parse_contents(rest));
     } else if let Some(json) = text.strip_prefix("windows ") {
         if !on_windows(json) {
             return;
@@ -145,6 +148,17 @@ fn on_input_message(text: &str) {
         return;
     }
     state::changed();
+}
+
+/// A `tt` frame after its verb: ` <cursor> <anchor> <text>` (byte offsets;
+/// the text is the rest of the frame), or nothing for no contents. Offsets
+/// off a char boundary or past the end are refused rather than trusted.
+fn parse_contents(rest: &str) -> Option<(String, usize, usize)> {
+    let mut it = rest.strip_prefix(' ')?.splitn(3, ' ');
+    let cursor: usize = it.next()?.parse().ok()?;
+    let anchor: usize = it.next()?.parse().ok()?;
+    let text = it.next().unwrap_or("").to_string();
+    (text.is_char_boundary(cursor) && text.is_char_boundary(anchor)).then_some((text, cursor, anchor))
 }
 
 /// A `windows [...]` reply: refresh the focused window's rect (the cursor

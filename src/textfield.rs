@@ -16,13 +16,20 @@
 //! State is published to a static and read by each `/ws` connection's loop,
 //! which applies the same field-switch grace `osk.rs` does before telling the
 //! page a field closed — see [`decide`].
+//!
+//! **The field's contents** come the same way: an app that reports its
+//! surrounding text (`set_surrounding_text`; cce-ui's `TextBox` and
+//! `DocEditor`, GTK, Qt, browsers) has the compositor relay it here, and the
+//! page shows it in its echo strip ([`contents_since`]). A field marked as a
+//! password or sensitive (its content type) is never passed on, whatever its
+//! app sends.
 
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use wayland_client::globals::{registry_queue_init, GlobalListContents};
 use wayland_client::protocol::{wl_registry, wl_seat};
-use wayland_client::{delegate_noop, Connection, Dispatch, QueueHandle};
+use wayland_client::{delegate_noop, Connection, Dispatch, QueueHandle, WEnum};
 use wayland_protocols_misc::zwp_input_method_v2::client::{
     zwp_input_method_manager_v2::ZwpInputMethodManagerV2,
     zwp_input_method_v2::{self, ZwpInputMethodV2},
@@ -51,6 +58,42 @@ struct Field {
 }
 
 static FIELD: Mutex<Field> = Mutex::new(Field { active: false, since: None, opened: 0 });
+
+/// What the open field holds, as its app reports it: `cursor` and `anchor`
+/// are byte offsets into `text`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Contents {
+    pub text: String,
+    pub cursor: u32,
+    pub anchor: u32,
+}
+
+/// The contents, and a count bumped on every change so a reader can tell it
+/// has the latest.
+static CONTENTS: Mutex<(u64, Option<Contents>)> = Mutex::new((0, None));
+
+fn publish_contents(now: Option<Contents>) {
+    let mut c = CONTENTS.lock().unwrap();
+    if c.1 != now {
+        c.0 += 1;
+        c.1 = now;
+    }
+}
+
+/// The field's contents, if they changed since the reader's count `seen`:
+/// the new count and contents (`None` when there are none to show).
+pub fn contents_since(seen: u64) -> Option<(u64, Option<Contents>)> {
+    let c = CONTENTS.lock().unwrap();
+    (c.0 != seen).then(|| (c.0, c.1.clone()))
+}
+
+/// Whether a field's content type marks it as one whose text must not leave
+/// the machine: a password or PIN, or hidden or sensitive text. Raw values
+/// from `text-input-unstable-v3` (hint bits `hidden_text` 0x40,
+/// `sensitive_data` 0x80; purposes `password` 8, `pin` 9).
+fn sensitive(hint: u32, purpose: u32) -> bool {
+    hint & (0x40 | 0x80) != 0 || matches!(purpose, 8 | 9)
+}
 /// Signalled on every activation, for [`wait_opened`].
 static OPENED: Condvar = Condvar::new();
 
@@ -119,6 +162,7 @@ pub fn spawn_watcher() {
         loop {
             let err = watch().err().unwrap_or_else(|| "connection closed".into());
             publish(false, false);
+            publish_contents(None);
             // Retrying every RETRY would repeat the same line forever while
             // another input method holds the seat; say it once.
             if err != last_err {
@@ -136,6 +180,11 @@ struct ImState {
     pending: bool,
     /// This batch carried an `activate`.
     activated: bool,
+    /// The field's surrounding text and whether its content type marks it
+    /// sensitive, double-buffered like the rest; an `activate` starts both
+    /// afresh.
+    contents: Option<Contents>,
+    sensitive: bool,
     unavailable: bool,
 }
 
@@ -167,11 +216,32 @@ impl Dispatch<ZwpInputMethodV2, ()> for ImState {
             zwp_input_method_v2::Event::Activate => {
                 state.pending = true;
                 state.activated = true;
+                state.contents = None;
+                state.sensitive = false;
             }
-            zwp_input_method_v2::Event::Deactivate => state.pending = false,
+            zwp_input_method_v2::Event::Deactivate => {
+                state.pending = false;
+                state.contents = None;
+            }
+            zwp_input_method_v2::Event::SurroundingText { text, cursor, anchor } => {
+                state.contents = Some(Contents { text, cursor, anchor });
+            }
+            zwp_input_method_v2::Event::ContentType { hint, purpose } => {
+                let hint = match hint {
+                    WEnum::Value(h) => h.bits(),
+                    WEnum::Unknown(u) => u,
+                };
+                let purpose = match purpose {
+                    WEnum::Value(p) => p.into(),
+                    WEnum::Unknown(u) => u,
+                };
+                state.sensitive = sensitive(hint, purpose);
+            }
             zwp_input_method_v2::Event::Done => {
                 publish(state.pending, state.activated);
                 state.activated = false;
+                let shown = state.pending && !state.sensitive;
+                publish_contents(state.contents.clone().filter(|_| shown));
             }
             zwp_input_method_v2::Event::Unavailable => state.unavailable = true,
             _ => {}
@@ -246,6 +316,31 @@ mod tests {
         assert!(t0.elapsed() < Duration::from_secs(1), "woken, not timed out");
         waker.join().unwrap();
         publish(false, false);
+    }
+
+    #[test]
+    fn passwords_and_sensitive_text_are_never_passed_on() {
+        assert!(!sensitive(0, 0), "a plain field");
+        assert!(!sensitive(0x1 | 0x200, 6), "completion, multiline, an email address");
+        assert!(sensitive(0, 8), "a password");
+        assert!(sensitive(0, 9), "a PIN");
+        assert!(sensitive(0x40, 0), "hidden text");
+        assert!(sensitive(0x80, 0), "sensitive data");
+    }
+
+    #[test]
+    fn contents_are_read_once_per_change() {
+        // The only test that touches CONTENTS.
+        let (seen, _) = contents_since(u64::MAX).unwrap();
+        assert_eq!(contents_since(seen), None, "nothing new");
+        let c = Contents { text: "hi".into(), cursor: 2, anchor: 2 };
+        publish_contents(Some(c.clone()));
+        let (seen, got) = contents_since(seen).unwrap();
+        assert_eq!(got, Some(c.clone()));
+        publish_contents(Some(c));
+        assert_eq!(contents_since(seen), None, "the same contents are no change");
+        publish_contents(None);
+        assert_eq!(contents_since(seen).map(|(_, c)| c), Some(None));
     }
 
     #[test]
