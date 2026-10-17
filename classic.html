@@ -131,9 +131,12 @@ function askPin(msg) {
   if (pin) localStorage.setItem("cce-remote-pin", pin.trim());
   return pin ? pin.trim() : null;
 }
+// wss on an https page (behind `tailscale serve`): a browser refuses a plain
+// ws:// socket from a secure page.
+const WS = (location.protocol === "https:" ? "wss://" : "ws://") + location.host;
 function connect() {
   authed = false;
-  ws = new WebSocket("ws://" + location.host + "/ws");
+  ws = new WebSocket(WS + "/ws");
   ws.onopen = () => {
     const pin = localStorage.getItem("cce-remote-pin") || askPin();
     if (pin) ws.send("auth " + pin); else ws.close();
@@ -203,7 +206,7 @@ let sws = null, lastFrameAt = 0, watchdog = null;
 function streamStart() {
   if (sws) { const old = sws; sws = null; try { old.close(); } catch (_) {} }
   const pin = localStorage.getItem("cce-remote-pin") || "";
-  const s = new WebSocket("ws://" + location.host + "/wstream");
+  const s = new WebSocket(WS + "/wstream");
   s.binaryType = "arraybuffer";
   sws = s;
   lastFrameAt = Date.now();
