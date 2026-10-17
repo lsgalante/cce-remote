@@ -1,7 +1,8 @@
 //! cce-remote — use a phone as a trackpad + keyboard for the cce desktop.
 //!
-//! One small server, no GUI: it serves the embedded `index.html` (a touch
-//! trackpad + keyboard page) over HTTP on the tailnet (see `reachable`), accepts a WebSocket at
+//! One small server, no GUI: it serves the embedded page (a cce-ui app built
+//! for the browser, `src/web`, with the hand-written `classic.html` as its
+//! fallback; see `site.rs`) over HTTP on the tailnet (see `reachable`), accepts a WebSocket at
 //! `/ws`, and translates the page's compact input events into the
 //! compositor's line-oriented control socket (`/tmp/cce-{WAYLAND_DISPLAY}.sock`
 //! — the same channel `ccectl` uses, so injection goes through the real
@@ -31,27 +32,11 @@ use std::time::Duration;
 use cce_core::ipc::ctl::{Request, WindowInfo};
 
 mod screencopy;
+mod site;
 mod stream;
 mod textfield;
 mod winstream;
 
-const INDEX_HTML: &str = include_str!("../index.html");
-
-/// Identity of the embedded page (FNV-1a). Sent to the page after auth so it
-/// can notice that a restarted server is serving a NEWER page than the one it
-/// is running, and reload itself — the page is baked into the binary, so
-/// every UI change otherwise needs a manual refresh on the phone.
-fn page_version() -> &'static str {
-    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    V.get_or_init(|| {
-        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        for b in INDEX_HTML.bytes() {
-            h ^= b as u64;
-            h = h.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        format!("{h:016x}")
-    })
-}
 const DEFAULT_PORT: u16 = 17017;
 
 /// How often an idle `/ws` connection checks whether a desktop text field
@@ -474,7 +459,7 @@ fn handle_ws(stream: TcpStream, pin: &str, ip: std::net::IpAddr, limiter: &RateL
     // a frame that a timeout split, so input is unaffected.
     let _ = ws.get_ref().set_read_timeout(Some(FIELD_POLL));
     let _ = ws.send(tungstenite::Message::Text("auth ok".into()));
-    let _ = ws.send(tungstenite::Message::Text(format!("ver {}", page_version())));
+    let _ = ws.send(tungstenite::Message::Text(format!("ver {}", site::version())));
     println!("[cce-remote] client connected: {peer}");
     // What this page was last told; a fresh page assumes no field is open.
     let mut field_sent = false;
@@ -665,19 +650,49 @@ fn handle_http(mut stream: TcpStream, request_head: &str, pin: &str, ip: std::ne
         }
         return;
     }
-    let ok = request_head.starts_with("GET / ") || request_head.starts_with("GET /index.html ");
-    let (status, body) = if ok {
-        ("200 OK", INDEX_HTML)
-    } else {
-        ("404 Not Found", "not found")
+    let Some(path) = get_path(request_head) else {
+        respond(&mut stream, "404 Not Found", "text/plain", "", b"not found");
+        return;
     };
-    // no-cache: a reload (manual or the automatic version-mismatch one) must
-    // refetch the page, not revalidate a heuristic cache entry.
-    let _ = write!(
-        stream,
-        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-cache\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len(),
-    );
+    // The DE's look for the cce-ui page: PIN-gated, as /shot is.
+    let private = |path: &str| path == "/boot" || path == "/config" || path.starts_with("/font/");
+    if private(path) {
+        if !header_gate(&mut stream, request_head, pin, ip, limiter) {
+            return;
+        }
+        // A font is the same bytes for the server's life: let the phone keep it.
+        const KEEP: &str = "Cache-Control: private, max-age=86400\r\n";
+        match path {
+            "/boot" => respond(&mut stream, "200 OK", "text/plain; charset=utf-8", "Cache-Control: no-store\r\n", site::boot().as_bytes()),
+            "/config" => respond(&mut stream, "200 OK", "text/plain; charset=utf-8", "Cache-Control: no-store\r\n", site::config().as_bytes()),
+            _ => match path["/font/".len()..].parse().ok().and_then(site::font) {
+                Some((bytes, ctype)) => respond(&mut stream, "200 OK", ctype, KEEP, &bytes),
+                None => respond(&mut stream, "404 Not Found", "text/plain", "", b"not found"),
+            },
+        }
+        return;
+    }
+    let gzip = request_head.lines().any(|l| {
+        let l = l.to_ascii_lowercase();
+        l.starts_with("accept-encoding:") && l.contains("gzip")
+    });
+    match site::asset(path, gzip) {
+        Some(reply) => respond(&mut stream, "200 OK", reply.ctype, &reply.headers, &reply.body),
+        None => respond(&mut stream, "404 Not Found", "text/plain", "", b"not found"),
+    }
+}
+
+/// The path of a `GET` request, without its query.
+fn get_path(request_head: &str) -> Option<&str> {
+    let target = request_head.strip_prefix("GET ")?.split_whitespace().next()?;
+    Some(target.split('?').next().unwrap_or(target))
+}
+
+/// A whole response: `headers` are further header lines, each ending in CRLF.
+fn respond(stream: &mut TcpStream, status: &str, ctype: &str, headers: &str, body: &[u8]) {
+    let head = format!("HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\n{headers}Connection: close\r\n\r\n", body.len());
+    let _ = stream.write_all(head.as_bytes());
+    let _ = stream.write_all(body);
 }
 
 fn main() {

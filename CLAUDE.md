@@ -6,18 +6,29 @@
 > what is specific to this crate.
 
 `cce-remote` turns a phone into a trackpad, keyboard, window switcher and live window
-viewer for the cce desktop. It is **the odd crate in this workspace**: not a compositor
-and not a Wayland GUI client. It has no `cce-ui` dependency, draws nothing, and opens no
-Wayland surface of its own (it *does* connect to Wayland, but only as a screencopy
-client). It is a headless tailnet server (LAN with `--lan`) — HTTP + WebSocket in, compositor control socket
-out — and its entire user interface is one hand-written `index.html` compiled into the
-binary with `include_str!`.
+viewer for the cce desktop. It is **the odd crate in this workspace**, two programs in
+one package:
 
-Mirroring a sibling app for structure is therefore the wrong instinct here. There is no
-`Application` trait, no `Message` enum, no widget tree. Five files:
+- **The server** (the binary, `src/main.rs` and its modules) — not a compositor and not
+  a Wayland GUI client. It draws nothing and opens no Wayland surface of its own (it
+  *does* connect to Wayland, as a screencopy client and a listen-only input method). It
+  is a headless tailnet server (LAN with `--lan`): HTTP + WebSocket in, compositor
+  control socket out.
+- **The page** (the library, `src/web`) — a **cce-ui app run in the phone's browser**
+  (WebGPU on a `<canvas>`, since 2026-10-17), compiled to wasm by `build.rs` and
+  embedded in the server binary. The hand-written page it replaced is kept as
+  `classic.html`, the fallback for a browser without WebGPU.
+
+So the server half has no `Application` trait, no `Message` enum and no widget tree —
+mirroring a sibling app's structure is the wrong instinct there — and the page half has
+exactly those, built the way `cce-ui/src/main.rs` (the reference app) builds them.
+
+The server:
 
 - **`src/main.rs`** — PIN auth + rate limiting, the HTTP/WS dispatch, the
   frame→command translator.
+- **`src/site.rs`** — what a browser is handed besides the sockets: the two pages, the
+  page's code (embedded from `build.rs`'s output), the DE's config and fonts.
 - **`src/stream.rs`** — live-view delivery: the latest-wins `Slot`, the ack-clocked
   sender and its adaptation ladder, and the producer that picks a frame source.
 - **`src/screencopy.rs`** — a persistent `wlr-screencopy` client (frame source #2), and
@@ -26,8 +37,14 @@ Mirroring a sibling app for structure is therefore the wrong instinct here. Ther
 - **`src/textfield.rs`** — a listen-only `input-method-v2` client: whether a desktop
   text field is open, for the page's "tap to type" bar.
 
-So the crate is a Wayland client twice over: screencopy per stream, and one
+So the server is a Wayland client twice over: screencopy per stream, and one
 input-method registration for the life of the process.
+
+The page (`src/web`; see "The page" below): `app.rs` (the cce-ui `Application`),
+`state.rs` (what the page knows, shared with its listeners), `net.rs` (the two sockets,
+frame decoding, `/click`), `pad.rs` (the trackpad), `kb.rs` (the phone keyboard),
+`icons.rs` (cce-icons glyphs, compiled in). `web/` holds its HTML shell, its loader
+(`app.js`) and the glyph SVGs; `build.rs` builds it.
 
 ## The invariant: the control socket is a full-privilege injection channel
 
@@ -138,8 +155,8 @@ read → reply → close. An earlier version held one persistent stream and sile
 reconnects, dropping commands; reading to EOF is also what makes multi-line replies like
 `windows --json` work at all.
 
-The page therefore does the coalescing: `queueFlush()` batches pointer deltas on a 12ms
-timer so a fast drag becomes ~80 commands/sec, not one per touch event. One thread is
+The page therefore does the coalescing: `queue_flush` (`pad.rs`; `queueFlush()` in the
+classic page) batches pointer deltas on a 12ms timer so a fast drag becomes ~80 commands/sec, not one per touch event. One thread is
 spawned per accepted connection, uncapped, and a `/stream` connection holds its thread
 for the life of the stream.
 
@@ -158,9 +175,10 @@ The delivery design (`stream.rs`) makes that failure structurally impossible:
 - The page's live view rides **`/wstream`**, a dedicated WebSocket (same `auth <pin>`
   first-frame gate): the server sends one frame, the page renders it and acks `n`, and
   only then does the newest frame go out. **At most one frame is ever in flight**, so a
-  degraded link costs frame *rate*, never accumulating latency. The ack is sent after
-  `drawImage`, not on receipt — so the measured send→ack time covers network + decode +
-  paint, which is what the user experiences.
+  degraded link costs frame *rate*, never accumulating latency. The ack is sent once
+  the frame is *painted* (`net::ack_painted`, from the app's `display_list`; after
+  `drawImage` in the classic page), not on receipt — so the measured send→ack time
+  covers network + decode + paint, which is what the user experiences.
 - That measurement drives an **adaptation ladder** (`LADDER`/`adapt()`): resolution up
   to 1400px edge when the link is fast, downgrades immediate, upgrades requiring
   sustained headroom. Encoding happens per *sent* frame at the chosen level. The ladder
@@ -271,45 +289,85 @@ rects from `windows --json` are in layout coordinates. Those are the same number
 because there is a single output sitting at the origin — true for this DE's eDP-1 setup,
 and the same assumption `grim` ran under. Multi-output would need a real mapping here.
 
-The cursor marker (`placeMarker`) maps the other way, through the `object-fit:
-contain` letterbox, and stays correct under pinch-zoom only because the zoom is a
-**uniform** CSS transform on an ancestor, so `getBoundingClientRect()` already
-reflects it. (Tap-to-spot mapping is gone: view-mode input is trackpad-identical —
-taps click where the cursor is.)
+The cursor ring maps the other way: from the pointer's layout position, through the
+focused window's rect, into the frame's contain-fit in the pad, then through the
+pinch's zoom and pan (`paint_pad`; `placeMarker` in the classic page, where the zoom is
+a uniform CSS transform that `getBoundingClientRect()` already reflects). (Tap-to-spot
+mapping is gone: view-mode input is trackpad-identical — taps click where the cursor is.)
 
-## `index.html` is the client, and iOS Safari shaped most of it
+## The page: a cce-ui app in the browser
 
-The page is versioned here and baked in at compile time, so **a UI change needs a
-rebuild, reinstall and restart of the server** — there is no asset path to edit live. It
-is vanilla JS, no build step, no dependencies.
+The phone loads `/`: `web/index.html` (a full-page canvas, the keyboard's textarea) and
+its loader `web/app.js`, which checks for WebGPU — **none, and it goes to `/classic`**,
+since cce-ui draws with nothing else (an iPhone needs iOS 26) — then asks for the PIN
+if it has none, fetches `/boot` (the font list), `/config` and the fonts, all behind
+the PIN, and starts the app. Everything after `start()` is Rust.
 
-Four of its non-obvious constructs are scar tissue. Do not "clean them up":
+**The app paints; it does not read the pad or the keyboard.** cce-ui's browser shell
+follows one finger and reads it as a touchscreen does (tap, scroll, held drag), and its
+keyboard sink lacks the iOS Backspace fix, so:
+
+- **`pad.rs` owns the trackpad's touches.** It reads the page's touch events itself (all
+  fingers, relative motion, the same gestures and constants as the classic page), and a
+  capture-phase pointer listener on the window **stops the matching pointer events
+  before cce-ui's canvas listeners see them**. Which touches are the pad's is decided by
+  position against the rects the app publishes in `state` (`pad`, `overlay_rect`) —
+  everything else (the keys, an open panel) is cce-ui's as usual. Every touch on the
+  canvas is `preventDefault`ed so iOS cannot move focus off the keyboard's textarea
+  mid-typing; pointer events come first and are not cancelled by it.
+- **`kb.rs` owns the keyboard**: its own hidden `<textarea id="kb">`, not cce-ui's sink.
+- **The app's buttons act in cce-ui's `pointerup` dispatch** (`handle_mouse_input` →
+  `drain`), synchronously — which is what lets the keyboard button, the type bar and
+  the left button raise the phone keyboard (a focus made inside the gesture).
+- **`state` is a thread-local the app and the listeners share.** Never call into the DOM
+  inside `state::with`: focusing the textarea raises `focus` synchronously, its listener
+  takes the state again, and the nested borrow panics.
+
+What carried over from the classic page, and must not be "cleaned up":
 
 - **The hidden textarea keeps sentinel padding** (`········`, cursor at the end, re-armed
   on focus plus a 1s drift-repair timer). iOS never fires `deleteContentBackward` on an
   empty field, so without something to delete, backspace silently does nothing.
   `beforeinput` is used throughout because iOS `keydown` reports keyCode 229.
-- **The zoom/pan transform lives on `#screenwrap`, not the frame element.** Uniform
-  ancestor transform means `getBoundingClientRect` reflects it, keeping the cursor
-  ring correctly placed while zoomed. (It also used to dodge an iOS bug where a
-  transformed multipart-MJPEG `<img>` stopped repainting; the view is a `<canvas>`
-  since the 2026-08-22 rework, but the structure stays.)
-- **The `overflow: hidden` clip lives on `#pad`, the non-transformed ancestor.** A clip
-  on the transformed element scales with its own content and clips nothing.
 - **The stream self-heals: reconnect on WS close plus a 30s no-frame watchdog** (the
   frame sources force keepalives ≤20s, so 30s of silence is a dead connection, not an
-  idle window). One guard worth keeping: the page only auto-reconnects `/wstream` if
-  that connection *paired successfully* — retry-looping a stale PIN would feed the
-  rate limiter and lock the phone's address out of the input socket too.
+  idle window). The page only auto-reconnects `/wstream` if that connection *paired
+  successfully* — retry-looping a stale PIN would feed the rate limiter and lock the
+  phone's address out of the input socket too.
+- **A poll reply repaints only when it changed something** (`ploc` 8×/s and `windows`
+  every 2s in the live view): the whole canvas is redrawn per frame, and repainting on
+  every reply kept a software-WebGPU browser pegged.
 
-**Every symbol on the page is a cce-icons glyph**, as in every cce app: the arrow,
-windows (`menu`), menu (`more-horizontal`) and keyboard buttons, and the `#status`
-mark (`circle` paired, `circle-outline` disconnected and, dimmed, while connecting).
-The page cannot call cce-ui's `upload_icon`, so each SVG is inlined from
-`../cce-icons/svg/<name>.svg` with its `#ffffff` swapped for `currentColor` (so CSS
-colours it) and a comment naming the file — copy again if a glyph is redrawn. Never
-a symbol character (they were `← ☰ ⋯ ⌨ ● ○ ·` until 2026-10-05); a button with only
-a glyph carries an `aria-label`.
+The page's look is the desktop's: `/config` is the DE's `config.kdl`, loaded with
+`cce_ui::color::reload_colors` before the app starts, and `/boot` lists the faces the
+config names (`site::fonts` finds `font="Berkeley Mono 14"`'s regular face in
+`$CCE_FONTS_DIR`, default `~/Dropbox/Fonts`), then Noto Sans and JetBrains Mono as
+fallbacks. Spacing is the ladder's, with one deliberate step down: **the key rows use
+`list_gap()`**, because the controls rung (24px) left seven keys too narrow for a thumb
+at a phone's width.
+
+**Every symbol is a cce-icons glyph**: the arrows, windows (`menu`), menu
+(`more-horizontal`), keyboard, and the connection mark (`circle` paired,
+`circle-outline` otherwise). A browser has no icon directory for `upload_icon`, so the
+SVGs are copied into `web/icons/` from `../cce-icons/svg/` and compiled in (`icons.rs`,
+tinted as `upload_icon_tinted` tints) — copy again if a glyph is redrawn.
+
+**Caching**: `/` is `no-cache` and names the build's version; the loader, the glue and
+the wasm (~1.7 MB gzipped, served with `Content-Encoding: gzip`) are fetched under
+`?v=<version>` and marked immutable, so a phone downloads the app once per server build.
+The `ver` frame after pairing reloads a page whose server has restarted onto new code,
+as before.
+
+## `classic.html`: the fallback
+
+The hand-written vanilla-JS page that was the whole UI until 2026-10-17, unchanged
+apart from its name, served at `/classic` (and at `/` by a server built without the
+app). It speaks the same protocol, so it keeps working; its scar tissue — the sentinel
+textarea, the zoom transform on `#screenwrap` (uniform, so `getBoundingClientRect`
+reflects it), the `overflow: hidden` clip on the non-transformed `#pad` — is documented
+in its own comments. Its glyphs are cce-icons SVGs inlined with `#ffffff` swapped for
+`currentColor`. Keep it working while the app is new; retire it once the app has
+proven itself on the phone.
 
 `SCROLL = 0.8`, not the 0.045 it started as: axis values reach clients as surface-px
 deltas, so near-unity is the trackpad-like 1:1 feel. A 300px swipe used to scroll one line.
@@ -321,12 +379,13 @@ The awkward part: **there is no WebSocket client on this machine** (no `websocat
 be driven from a real phone, or by writing a throwaway client.
 
 The pure functions are the exception, and they are where the crate's invariants are
-actually enforced, so they carry all the tests (`cargo test -p cce-remote`, 32 of them:
-21 in `main.rs`, 6 in `stream.rs`, 5 in `textfield.rs`) — `translate()` for what a paired
-client may say, the three PIN gates for who is paired at all, in `stream.rs` the `Slot`'s
-latest-wins semantics plus `adapt()`/`LADDER`, and in `textfield.rs` the field-switch
-grace (`decide`) and the click's activation wait (`wait_opened`). They cover the accepted shapes and — more to the point —
-everything that
+actually enforced, so they carry all the tests (`cargo test -p cce-remote`, 35 of them:
+21 in `main.rs`, 6 in `stream.rs`, 5 in `textfield.rs`, 3 in `site.rs`) —
+`translate()` for what a paired client may say, the three PIN gates for who is paired
+at all, in `stream.rs` the `Slot`'s latest-wins semantics plus `adapt()`/`LADDER`, in
+`textfield.rs` the field-switch grace (`decide`) and the click's activation wait
+(`wait_opened`), and in `site.rs` the font resolution and the caching headers. They
+cover the accepted shapes and — more to the point — everything that
 must be refused: unknown verbs *including the compositor's own command names*,
 malformed and missing arguments, `wf` targets outside `safe_token`, unwhitelisted `cmd`
 names, and the property that no input can make the output span two lines (an embedded
@@ -352,6 +411,26 @@ same rect the frame sources capture and the page places its cursor ring inside, 
 is the quickest check that focus resolution and geometry agree. (The page does not read
 this header; nothing in the page fetches `/shot` at all.)
 
+**The page is checked in headless Chrome against a shadow session.** The built-in
+browser pane has no WebGPU adapter, and Chrome run *inside* a shadow segfaults; headless
+Chrome with SwiftShader works (cce-ui's `scripts/web-probe/browser.mjs` flags:
+`--headless=new --enable-unsafe-webgpu --use-webgpu-adapter=swiftshader
+--enable-features=Vulkan --use-angle=swiftshader --enable-unsafe-swiftshader
+--disable-gpu-compositing --remote-debugging-port=<p>`). Drive it over CDP: phone
+emulation (`Emulation.setDeviceMetricsOverride` 390×844 @2, `mobile`, plus
+`setTouchEmulationEnabled`) — it lasts only as long as the CDP session, and re-applying
+it per step resizes the canvas between steps, so run a scenario in ONE session;
+`Input.dispatchTouchEvent` for fingers (multi-touch and pinch work); `Input.insertText`
+for typing (it fires `beforeinput`); the PIN pre-seeded with
+`Page.addScriptToEvaluateOnNewDocument`. Headless screenshots leave a WebGPU canvas
+blank, so the page exports `capture()` (cce-ui's `web::capture`, `[w, h, rgba]`):
+`import('/cce_remote.js?v=<v>')` from the page returns the same module instance. CDP
+console events are lost across a navigation; hook `console` into a page variable from
+the same new-document script instead. Run the server in the shadow on a spare port with
+`CCE_FONTS_DIR` set (a shadow's HOME is its own, so the DE's fonts are not found).
+Expect software WebGPU to be slow — the live view pegs a dozen cores — which a phone's
+GPU is not.
+
 **Injected input lands in the live session** — pointer moves steer the user's real
 cursor and keystrokes go into whatever they have focused. To exercise the input path
 safely, point the server at the **shadow session** instead: run it with
@@ -366,6 +445,21 @@ startup, so a server is bound to whichever session launched it for its whole lif
 `make install` → `ccebuild install --no-build cce-remote`. Never hand-list binaries in
 the Makefile — `cargo metadata` already knows them. `Cargo.lock` is committed here, so
 refresh it when dependencies change.
+
+**`build.rs` builds the page** on every native build of the package (any change under
+`src/web`, `src/lib.rs` or `web/` reruns it): a nested `cargo build --lib --release
+--target wasm32-unknown-unknown` into `<target>/web` (its own target dir — the outer
+build holds its own dir's lock), with the outer build's flags stripped and
+`--cfg=web_sys_unstable_apis` set (web-sys's WebGPU bindings); then the `wasm-bindgen`
+CLI (`$WASM_BINDGEN`, PATH, or `~/.cargo/bin`) binds it into `$OUT_DIR/site`, and the
+wasm is gzipped beside itself. So `ccebuild install cce-remote` needs nothing extra —
+but it needs the wasm32 target (Arch: `rust-wasm`) and **a wasm-bindgen CLI of exactly
+the lock's wasm-bindgen version** (0.2.126 in both the workspace's lock and this
+crate's; the standalone lock was seeded from the workspace's to keep them equal —
+`cargo update` would move it to whatever is newest and break the build until the CLI
+follows). A change to cce-ui itself does not rerun `build.rs`; touch `src/web` to pick it
+up. `CCE_REMOTE_SKIP_WEB=1` builds the server without the app (empty placeholders), for
+a machine without the toolchain: `/` then serves the classic page.
 
 **Committing is not publishing — pushing is.** This directory is its own git repository
 whose `origin` is GitHub (`https://github.com/lsgalante/cce-remote.git`), and a
@@ -398,9 +492,9 @@ service on a replaced binary, including ones another session has installed but i
 ready to restart (WORKSPACE.md, "Concurrent sessions"). The scoped form reaches this
 service because `cce-remote.service` ships from this crate root, and among those units
 it restarts only the ones whose `/proc/<pid>/exe` reads `(deleted)`; `--all` restarts
-them regardless. Editing `index.html` counts as a code change for this purpose — it is
-`include_str!`'d, so the page only updates once the binary is rebuilt, reinstalled *and*
-the service restarted.
+them regardless. Editing the page (`src/web`, `web/`, `classic.html`) counts as a code
+change for this purpose — it is embedded, so the page only updates once the binary is
+rebuilt, reinstalled *and* the service restarted.
 
 The unit was unversioned until 2026-08-22 — a hand-written file that existed only in
 `~/.config/systemd/user/`, in no repo, and so lost on a fresh clone with nothing here to

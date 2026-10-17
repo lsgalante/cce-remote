@@ -1,0 +1,6 @@
+<svg width="40" height="40" viewBox="0 0 40 40" xmlns="http://www.w3.org/2000/svg">
+  <!-- Hollow ring: circle.svg's "off" partner (a toggle or radio mark that is not set,
+       a disconnected status). Stroke 5 on r=12.5, so the outer edge lands at
+       circle.svg's r=15 and the two read as one shape, filled or not. -->
+  <circle cx="20" cy="20" r="12.5" fill="none" stroke="#ffffff" stroke-width="5" />
+</svg>

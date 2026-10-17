@@ -7,7 +7,16 @@ keyboard UI) over HTTP on your tailnet and bridges the page's WebSocket input
 events into the compositor's control socket — the same channel `ccectl`
 uses, so injection rides the real compositor input path.
 
+The page is a cce-ui app compiled to WebAssembly, so it looks like the
+desktop (its colours and font come from the DE's config). It draws with
+WebGPU — on an iPhone that means iOS 26 or later; a browser without it is
+sent to `/classic`, the plain HTML page the app replaced.
+
 ## Run
+
+Building needs the `wasm32-unknown-unknown` target and the `wasm-bindgen`
+CLI at the version in `Cargo.lock` (`cargo install wasm-bindgen-cli
+--version 0.2.126`); `CCE_REMOTE_SKIP_WEB=1` builds without the app.
 
 ```sh
 make install        # installs cce-remote to ~/.local/bin
@@ -30,7 +39,8 @@ app feel. A connection from anywhere else gets a 403 saying so.
   tap again to release — chords work: ctrl on, tap `c`, ctrl off)
 - keyboard button — summon the phone keyboard (typing goes through a US-layout
   char→evdev map; iOS `beforeinput` is used, so autocorrect noise is
-  filtered)
+  filtered). A tap that opens a text field on the desktop raises it by
+  itself; a field opened any other way shows a "tap to type" bar
 - windows button (three bars) — window switcher: tap a window to focus it
 - menu button (three dots) → live view — window view mode: a live stream of the focused window, delivered
   ack-clocked over a WebSocket — at most one frame in flight, so a slow

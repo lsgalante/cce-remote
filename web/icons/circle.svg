@@ -1,0 +1,5 @@
+<svg width="40" height="40" viewBox="0 0 40 40" xmlns="http://www.w3.org/2000/svg">
+  <!-- Solid circle primitive (r inset slightly from the 4..36 glyph bounds
+       to balance the solid-glyph family's visual weight) -->
+  <circle cx="20" cy="20" r="15" fill="#ffffff" />
+</svg>

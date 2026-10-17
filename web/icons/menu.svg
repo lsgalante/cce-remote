@@ -1,0 +1,9 @@
+<svg width="40" height="40" viewBox="0 0 40 40" xmlns="http://www.w3.org/2000/svg">
+  <!-- Three bars (the hamburger): a list or switcher panel. Each bar is
+       minus.svg's, 6 thick with round ends, stacked on 9.5 centres. -->
+  <g fill="#ffffff">
+    <rect x="4" y="7.5" width="32" height="6" rx="3" />
+    <rect x="4" y="17" width="32" height="6" rx="3" />
+    <rect x="4" y="26.5" width="32" height="6" rx="3" />
+  </g>
+</svg>

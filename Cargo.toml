@@ -5,7 +5,20 @@ edition = "2021"
 description = "Phone trackpad + keyboard for the cce desktop: serves a web UI and bridges WebSocket input events to the compositor control socket"
 license = "GPL-3.0"
 
-[dependencies]
+# Two halves in one package. The binary (src/main.rs) is the server. The
+# library is the page: a cce-ui app built for wasm32 (src/web), which
+# build.rs compiles with a nested cargo, binds with wasm-bindgen and leaves
+# in OUT_DIR for the server to embed. Natively the library is empty.
+[lib]
+name = "cce_remote"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "cce-remote"
+path = "src/main.rs"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # The compositor's socket names and the windows --json line (ipc::ctl);
 # GUI-free, without the KDL config.
 cce-core = { git = "https://github.com/lsgalante/cce-core.git", rev = "cfe7a9307866896bdd1dd4319c44a6cb6f33db21", default-features = false, features = ["json"] }
@@ -17,3 +30,48 @@ wayland-protocols-misc = { version = "0.3", features = ["client"] }
 memmap2 = "0.9"
 jpeg-encoder = "0.6"
 rustix = { version = "0.38", features = ["event"] }
+
+# The page: cce-ui's browser shell, and the browser APIs the trackpad, the
+# keyboard, the two sockets and the frame decoder reach directly.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+cce-ui = { git = "https://github.com/lsgalante/cce-ui.git", rev = "dc5eee9ae67076a9945e1edd8ffc82714987f1ef" }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "console",
+    "Window",
+    "Document",
+    "Element",
+    "HtmlElement",
+    "HtmlCanvasElement",
+    "HtmlTextAreaElement",
+    "DomRect",
+    "Location",
+    "Storage",
+    "Event",
+    "EventTarget",
+    "AddEventListenerOptions",
+    "FocusEvent",
+    "InputEvent",
+    "PointerEvent",
+    "Touch",
+    "TouchEvent",
+    "TouchList",
+    "WebSocket",
+    "MessageEvent",
+    "CloseEvent",
+    "BinaryType",
+    "Blob",
+    "BlobPropertyBag",
+    "ImageBitmap",
+    "ImageData",
+    "OffscreenCanvas",
+    "OffscreenCanvasRenderingContext2d",
+    "XmlHttpRequest",
+    "Navigator",
+] }
+
+[build-dependencies]
+# The page's wasm is served gzipped: ~7 MB raw, a third of that compressed.
+flate2 = "1"

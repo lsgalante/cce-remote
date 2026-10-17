@@ -1,0 +1,10 @@
+<svg width="40" height="40" viewBox="0 0 40 40" xmlns="http://www.w3.org/2000/svg">
+  <!-- Three dots in a row: an overflow menu, or the segments a breadcrumb
+       folded away. Dots r=3.5, on centres 12 apart so the row spans the
+       4..36 glyph bounds. -->
+  <g fill="#ffffff">
+    <circle cx="8" cy="20" r="3.5" />
+    <circle cx="20" cy="20" r="3.5" />
+    <circle cx="32" cy="20" r="3.5" />
+  </g>
+</svg>
