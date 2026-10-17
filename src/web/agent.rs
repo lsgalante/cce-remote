@@ -580,6 +580,9 @@ pub struct View {
     content_h: f32,
     stick_bottom: bool,
     seen_rev: u64,
+    /// The body's height last painted: when it changes, its bottom edge
+    /// keeps its place in the content.
+    seen_body_h: f32,
     press: Option<(f32, f32)>,
     roots: Vec<WidgetId>,
 }
@@ -616,6 +619,7 @@ impl View {
             content_h: 0.0,
             stick_bottom: true,
             seen_rev: 0,
+            seen_body_h: 0.0,
             press: None,
             roots: Vec::new(),
         }
@@ -818,7 +822,15 @@ impl View {
             }
             return;
         };
-        if (x - px).abs() > TAP_SLOP || (y - py).abs() > TAP_SLOP || !contains(self.body, x, y) {
+        if (x - px).abs() > TAP_SLOP || (y - py).abs() > TAP_SLOP {
+            return;
+        }
+        // The prompt strip is a field: a tap on it raises the keyboard.
+        if self.strip.is_some_and(|s| contains(s, x, y)) {
+            kb::open();
+            return;
+        }
+        if !contains(self.body, x, y) {
             return;
         }
         let cy = y - content_top(self.body) + self.scroll;
@@ -997,11 +1009,26 @@ impl View {
         self.content_h = y + 2.0 * inset;
         self.hits = hits;
         let max = (self.content_h - b.height).max(0.0);
+        // The body shrinks when the keyboard comes up (the canvas ends where
+        // it begins) and when the draft grows a line. Held from the top, its
+        // last lines went under the strip; held from the bottom, what was
+        // being read stays in view, as in a chat app.
+        if b.height != self.seen_body_h {
+            if self.seen_body_h > 0.0 {
+                self.scroll += self.seen_body_h - b.height;
+            }
+            self.seen_body_h = b.height;
+        }
+        let pinned = self.stick_bottom && matches!(screen, Screen::Session { .. });
         if tr_rev != self.seen_rev {
             self.seen_rev = tr_rev;
-            if self.stick_bottom && matches!(screen, Screen::Session { .. }) {
+            if pinned {
                 self.scroll = max;
             }
+        }
+        // At the end, it stays at the end, whatever the body's height did.
+        if pinned && self.scroll < max {
+            self.scroll = max;
         }
         self.scroll = self.scroll.clamp(0.0, max);
         let oy = inner.y - self.scroll;

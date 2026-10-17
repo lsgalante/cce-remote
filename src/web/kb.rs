@@ -59,6 +59,14 @@ pub fn toggle() {
     }
 }
 
+/// Raise the keyboard if it is down, as the keyboard button would: called
+/// inside a tap, the only place the phone lets a page raise it.
+pub fn open() {
+    if !is_up() {
+        let _ = kb().focus();
+    }
+}
+
 /// Raise the keyboard for a desktop field (the type bar, a tap that opened
 /// one); a closing field may then drop it.
 pub fn open_for_field() {
