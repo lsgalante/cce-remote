@@ -63,6 +63,12 @@
              background: #191b23; border: 1px solid #2e3140; border-radius: 8px;
              font-size: 15px; color: #cfe8e8; white-space: pre-wrap; word-break: break-all; }
   #preview.show { display: block; }
+  /* Offered while a desktop text field is open and the keyboard is not:
+     the page may only raise the keyboard from a tap, so it asks for one. */
+  #typebar { display: none; margin: 0 8px 6px; padding: 10px; font-size: 14px;
+             font-family: inherit; color: #7dffff; background: #1d3a44;
+             border: 1px solid #337fc0; border-radius: 8px; }
+  #typebar.show { display: block; }
   /* The echo's caret: a bar, as the DE draws a text caret (a quad), not a
      block character from whatever face the font falls back to. */
   #preview.show::after { content: ""; display: inline-block; width: 2px; height: 1.1em;
@@ -96,6 +102,7 @@
   <button id="mbtn" aria-label="menu"><svg class="g" viewBox="0 0 40 40" aria-hidden="true"><!-- cce-icons/svg/more-horizontal.svg --><g fill="currentColor"><circle cx="8" cy="20" r="3.5"/><circle cx="20" cy="20" r="3.5"/><circle cx="32" cy="20" r="3.5"/></g></svg></button>
   <button id="kbtn" aria-label="keyboard"><svg class="g" viewBox="0 0 40 40" aria-hidden="true"><!-- cce-icons/svg/keyboard.svg --><path fill="currentColor" d="M3 16.75 C3 12.25 5.25 10 9.75 10 L30.25 10 C34.75 10 37 12.25 37 16.75 L37 23.25 C37 27.75 34.75 30 30.25 30 L9.75 30 C5.25 30 3 27.75 3 23.25 Z"/><g fill="#282a36" opacity="0.35"><circle cx="9" cy="15.5" r="1.6"/><circle cx="14.5" cy="15.5" r="1.6"/><circle cx="20" cy="15.5" r="1.6"/><circle cx="25.5" cy="15.5" r="1.6"/><circle cx="31" cy="15.5" r="1.6"/><circle cx="11.75" cy="20" r="1.6"/><circle cx="17.25" cy="20" r="1.6"/><circle cx="22.75" cy="20" r="1.6"/><circle cx="28.25" cy="20" r="1.6"/><path d="M13 23.5 L27 23.5 C27.83 23.5 28.5 24.17 28.5 25 C28.5 25.83 27.83 26.5 27 26.5 L13 26.5 C12.17 26.5 11.5 25.83 11.5 25 C11.5 24.17 12.17 23.5 13 23.5 Z"/></g></svg></button>
 </div>
+<button id="typebar">tap to type into the field</button>
 <div id="preview"></div>
 <div id="pad"><div class="hint">drag = move · tap = click · 2-finger drag = scroll<br>2-finger tap = right click · hold = drag</div>
   <div id="screenwrap"><canvas id="screen" width="0" height="0"></canvas></div>
@@ -143,6 +150,7 @@ function connect() {
       if (pageVer === null) pageVer = v;
       else if (pageVer !== v) location.reload();
     }
+    else if (e.data === "ti 1" || e.data === "ti 0") { setField(e.data === "ti 1"); }
     else if (e.data === "auth ok") { authed = true; setStatus("authed", "paired", "#5fbf6f"); }
     else if (e.data === "auth fail") {
       localStorage.removeItem("cce-remote-pin");
@@ -150,7 +158,9 @@ function connect() {
       // server closed on failure; onclose reconnects with the new PIN
     }
   };
-  ws.onclose = () => { authed = false; setStatus("off", "disconnected", "#bf5f5f"); setTimeout(connect, 1000); };
+  // A dropped socket hides the type bar but leaves an open keyboard alone:
+  // the reconnect repeats `ti 1` if the field is still open.
+  ws.onclose = () => { authed = false; fieldOpen = false; updTypebar(); setStatus("off", "disconnected", "#bf5f5f"); setTimeout(connect, 1000); };
 }
 connect();
 function send(s) { if (authed && ws && ws.readyState === 1) ws.send(s); }
@@ -519,8 +529,25 @@ function updPreview() {
   preview.textContent = typed;
   preview.classList.toggle("show", document.activeElement === kb);
 }
-kb.addEventListener("focus", () => { armKb(); updPreview(); });
-kb.addEventListener("blur", () => { typed = ""; updPreview(); });
+kb.addEventListener("focus", () => { armKb(); updPreview(); updTypebar(); });
+kb.addEventListener("blur", () => { typed = ""; kbByField = false; updPreview(); updTypebar(); });
+
+// ── Desktop text field → keyboard ────────────────────────────────────
+// The server sends `ti 1` when a text field on the desktop opens for typing
+// and `ti 0` when it closes (field switches already smoothed over). iOS
+// raises the keyboard only from the user's own tap, never from a message,
+// so an opening shows #typebar to tap. A closing drops the keyboard — but
+// only one that bar raised: a keyboard opened with the keyboard button
+// stays, as cce-compositor's osk.rs leaves a board summoned by hand.
+const typebar = document.getElementById("typebar");
+let fieldOpen = false, kbByField = false;
+function updTypebar() { typebar.classList.toggle("show", fieldOpen && document.activeElement !== kb); }
+function setField(open) {
+  fieldOpen = open;
+  if (!open && kbByField && document.activeElement === kb) kb.blur();
+  updTypebar();
+}
+typebar.addEventListener("click", () => { kb.focus(); kbByField = true; });
 // US-layout char → [evdev keycode, needs shift]
 const KEYS = {};
 "abcdefghijklmnopqrstuvwxyz".split("").forEach((c, i) => {

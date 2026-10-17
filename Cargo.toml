@@ -12,6 +12,8 @@ cce-core = { git = "https://github.com/lsgalante/cce-core.git", rev = "cfe7a9307
 tungstenite = "0.21"
 wayland-client = "0.31"
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+# input-method-v2: told when a desktop text field opens (textfield.rs)
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
 memmap2 = "0.9"
 jpeg-encoder = "0.6"
 rustix = { version = "0.38", features = ["event"] }

@@ -15,6 +15,9 @@
 //!   k <keycode>          tap an evdev keycode
 //!   kd <keycode> / ku <keycode>   hold / release (modifiers)
 //!
+//! And from the server: `ti 1` / `ti 0` when a desktop text field opens /
+//! closes (`textfield.rs`), so the page can offer its keyboard.
+//!
 //! Security model: pairing PIN. A persistent 6-digit PIN (generated on first
 //! run, stored 0600 under ~/.config/cce/cce-remote.pin, printed at startup)
 //! must arrive as the FIRST WebSocket frame (`auth <pin>`) before any input
@@ -29,6 +32,7 @@ use cce_core::ipc::ctl::{Request, WindowInfo};
 
 mod screencopy;
 mod stream;
+mod textfield;
 mod winstream;
 
 const INDEX_HTML: &str = include_str!("../index.html");
@@ -49,6 +53,10 @@ fn page_version() -> &'static str {
     })
 }
 const DEFAULT_PORT: u16 = 17017;
+
+/// How often an idle `/ws` connection checks whether a desktop text field
+/// opened or closed — the latency of the page's "tap to type" prompt.
+const FIELD_POLL: Duration = Duration::from_millis(100);
 
 /// `$WAYLAND_DISPLAY`, else `wayland-0`: run from a service or a login shell
 /// with no display set, this still finds the session's compositor.
@@ -454,12 +462,34 @@ fn handle_ws(stream: TcpStream, pin: &str, ip: std::net::IpAddr, limiter: &RateL
         return;
     }
     limiter.record_success(ip);
-    let _ = ws.get_ref().set_read_timeout(None);
+    // Short reads from here on: an idle read returns every FIELD_POLL so the
+    // loop can tell the page a text field opened or closed. tungstenite keeps
+    // a frame that a timeout split, so input is unaffected.
+    let _ = ws.get_ref().set_read_timeout(Some(FIELD_POLL));
     let _ = ws.send(tungstenite::Message::Text("auth ok".into()));
     let _ = ws.send(tungstenite::Message::Text(format!("ver {}", page_version())));
     println!("[cce-remote] client connected: {peer}");
-    while let Ok(msg) = ws.read() {
-        if let tungstenite::Message::Text(text) = msg {
+    // What this page was last told; a fresh page assumes no field is open.
+    let mut field_sent = false;
+    loop {
+        let msg = match ws.read() {
+            Ok(msg) => Some(msg),
+            Err(tungstenite::Error::Io(e))
+                if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) =>
+            {
+                None
+            }
+            Err(_) => break,
+        };
+        if let Some(open) = textfield::notice(field_sent, std::time::Instant::now()) {
+            // Fixed strings, nothing from the frame: not a translate() concern.
+            let notice = if open { "ti 1" } else { "ti 0" };
+            if ws.send(tungstenite::Message::Text(notice.into())).is_err() {
+                break;
+            }
+            field_sent = open;
+        }
+        if let Some(tungstenite::Message::Text(text)) = msg {
             if text.trim() == "wl" {
                 // Window-list request: the one message with a reply.
                 let _ = ws.send(tungstenite::Message::Text(window_list_json()));
@@ -642,6 +672,7 @@ fn main() {
         }
     };
     let limiter = std::sync::Arc::new(RateLimiter::new());
+    textfield::spawn_watcher();
     if lan {
         println!("[cce-remote] serving EVERY interface on :{port} (--lan: the PIN crosses the network in clear)");
     } else {

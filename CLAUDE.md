@@ -14,7 +14,7 @@ out — and its entire user interface is one hand-written `index.html` compiled 
 binary with `include_str!`.
 
 Mirroring a sibling app for structure is therefore the wrong instinct here. There is no
-`Application` trait, no `Message` enum, no widget tree. Four files:
+`Application` trait, no `Message` enum, no widget tree. Five files:
 
 - **`src/main.rs`** — PIN auth + rate limiting, the HTTP/WS dispatch, the
   frame→command translator.
@@ -23,6 +23,11 @@ Mirroring a sibling app for structure is therefore the wrong instinct here. Ther
 - **`src/screencopy.rs`** — a persistent `wlr-screencopy` client (frame source #2), and
   `downscale_encode`, shared by both raw frame sources.
 - **`src/winstream.rs`** — consumer of the compositor's window-stream socket (source #1).
+- **`src/textfield.rs`** — a listen-only `input-method-v2` client: whether a desktop
+  text field is open, for the page's "tap to type" bar.
+
+So the crate is a Wayland client twice over: screencopy per stream, and one
+input-method registration for the life of the process.
 
 ## The invariant: the control socket is a full-privilege injection channel
 
@@ -210,6 +215,38 @@ passes `overlay_cursor=1`, so on that fallback you see the real cursor *and* the
 file** — verified: a `/shot` leaves nothing new in `~/Pictures/screenshots`. Remote
 viewing must not accumulate captures on disk.
 
+## The "tap to type" bar: the server as a listen-only input method
+
+When a text field on the desktop opens for typing, the page shows a bar that opens the
+phone keyboard (since 2026-10-17). The signal is the compositor's text-input relay
+(`input_relay.rs`): it hands `activate`/`deactivate` to the seat's one
+`input-method-v2` client, and `textfield.rs` registers as that client at startup. It
+**commits nothing, sets no preedit and grabs no keyboard** — typing still goes through
+the control socket as keycodes — so apps behave exactly as they would with no input
+method. Any cce-ui field that claims (`cce_ui::text_input::claim`) triggers it, as do
+GTK, Qt and browser fields.
+
+- **The seat takes one input method.** If another holds it (fcitx, ibus) the compositor
+  answers `unavailable`; the watcher logs that once, retries every 10s, and the bar
+  simply never shows. Two `cce-remote`s on one session hit this too — the second has no
+  bar.
+- **Delivery is polled, not pushed.** `handle_ws` reads with a 100ms timeout
+  (`FIELD_POLL`) so its loop can send `ti 1`/`ti 0`; tungstenite keeps a frame a
+  timeout split. The frames are fixed strings carrying nothing from the client, so
+  `translate()` is not involved and the injection surface is unchanged.
+- **A close waits 250ms** (`CLOSE_GRACE`, matching `osk.rs`'s `HIDE_DELAY_MS`): moving
+  between fields disables one and enables the next, and the bar must not flicker.
+  An open is sent at once.
+- **The page cannot raise the keyboard itself.** iOS (and mostly Android) open it only
+  from the user's own tap, never from a WS message — hence a bar to tap rather than
+  `kb.focus()` on `ti 1`. A close blurs the keyboard **only if the bar raised it**; one
+  opened with the keyboard button stays, as `osk.rs` leaves a hand-summoned board.
+
+Not done, and why: `commit_string` would type Unicode the keycode table cannot, but it
+travels on the Wayland connection while Backspace/Enter go through the control socket,
+and the two can reorder. Field *contents* on the phone need `surrounding_text`, which
+cce-ui does not send yet (a shared-crate change).
+
 ## Geometry assumes one output at 0,0
 
 The region passed to screencopy is in output-local logical coordinates, and the window
@@ -267,10 +304,11 @@ The awkward part: **there is no WebSocket client on this machine** (no `websocat
 be driven from a real phone, or by writing a throwaway client.
 
 The pure functions are the exception, and they are where the crate's invariants are
-actually enforced, so they carry all the tests (`cargo test -p cce-remote`, 25 of them:
-19 in `main.rs`, 6 in `stream.rs`) — `translate()` for what a paired client may say, the
-three PIN gates for who is paired at all, and in `stream.rs` the `Slot`'s latest-wins
-semantics plus `adapt()`/`LADDER`. They cover the accepted shapes and — more to the point —
+actually enforced, so they carry all the tests (`cargo test -p cce-remote`, 31 of them:
+21 in `main.rs`, 6 in `stream.rs`, 4 in `textfield.rs`) — `translate()` for what a paired
+client may say, the three PIN gates for who is paired at all, in `stream.rs` the `Slot`'s
+latest-wins semantics plus `adapt()`/`LADDER`, and in `textfield.rs` the field-switch
+grace (`decide`). They cover the accepted shapes and — more to the point —
 everything that
 must be refused: unknown verbs *including the compositor's own command names*,
 malformed and missing arguments, `wf` targets outside `safe_token`, unwhitelisted `cmd`
