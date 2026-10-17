@@ -28,6 +28,19 @@ Open `http://<this-machine's-Tailscale-address>:17017` on the phone (its
 100.x address or MagicDNS name). Add it to the Home Screen for a fullscreen
 app feel. A connection from anywhere else gets a 403 saying so.
 
+The cce-ui page needs HTTPS (a browser offers WebGPU only on a secure page;
+over plain HTTP you get the classic page). Point a DNS name you control at
+the machine's tailnet address, then, with a Cloudflare API token for that
+zone (Zone:DNS:Edit) in `~/.config/cce/cloudflare-dns.token`:
+
+```sh
+cce-remote-cert remote.example.com                 # Let's Encrypt via DNS; needs lego
+systemctl --user enable --now cce-remote-cert.timer   # renews it
+```
+
+and open `https://remote.example.com:17017`. The same port keeps serving
+plain HTTP, and a renewed certificate is picked up without a restart.
+
 ## Controls
 
 - one-finger drag — move the pointer
@@ -72,7 +85,8 @@ success clears the peer's record, so a phone reconnecting its stream is never
 throttled — unless someone has drained the global budget, which locks everyone
 out until it refills.
 
-Traffic is plain HTTP, so the PIN crosses the wire in clear. That is why only
+Over plain HTTP the PIN crosses the wire in clear (over HTTPS it does not).
+That is why only
 loopback and the tailnet (100.64.0.0/10, fd7a:115c:a1e0::/48) are served by
 default: WireGuard encrypts the tailnet end to end. `--lan` serves every
 interface; use it only on a network you trust.

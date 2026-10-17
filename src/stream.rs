@@ -251,7 +251,7 @@ fn produce_grim(slot: &Slot, stop: &AtomicBool) -> Result<(), String> {
 /// after RENDERING each frame — so the measured send→ack time covers network,
 /// decode and paint, i.e. what the user actually experiences — and only then
 /// does the newest frame go out.
-pub fn run_ws_sender(ws: &mut tungstenite::WebSocket<std::net::TcpStream>, slot: &Slot) {
+pub fn run_ws_sender(ws: &mut tungstenite::WebSocket<crate::conn::Conn>, slot: &Slot) {
     let mut last_seq = 0u64;
     let mut level = START_LEVEL;
     let mut ewma_ms = 120.0f64;
@@ -326,7 +326,7 @@ pub fn run_ws_sender(ws: &mut tungstenite::WebSocket<std::net::TcpStream>, slot:
 /// Latest-wins still applies (each iteration encodes only the newest frame),
 /// but without acks the TCP buffer can still queue a few frames; the page no
 /// longer uses this path.
-pub fn run_mjpeg_sender(tcp: &mut std::net::TcpStream, slot: &Slot) {
+pub fn run_mjpeg_sender(tcp: &mut crate::conn::Conn, slot: &Slot) {
     let mut last = 0u64;
     loop {
         match slot.wait_newer(last, Duration::from_secs(25)) {

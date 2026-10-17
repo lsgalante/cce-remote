@@ -1,0 +1,10 @@
+# Get or renew cce-remote's HTTPS certificate (scripts/cce-remote-cert).
+# Driven by cce-remote-cert.timer; harmless to start by hand. A failure (no
+# network, Cloudflare down) exits nonzero and the timer tries again tomorrow,
+# well inside the month lego renews ahead of expiry.
+[Unit]
+Description=Renew cce-remote's HTTPS certificate
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/cce-remote-cert

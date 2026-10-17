@@ -1,0 +1,10 @@
+[Unit]
+Description=Renew cce-remote's HTTPS certificate when it is due, daily
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -30,6 +30,8 @@ wayland-protocols-misc = { version = "0.3", features = ["client"] }
 memmap2 = "0.9"
 jpeg-encoder = "0.6"
 rustix = { version = "0.38", features = ["event"] }
+# HTTPS for the page (tls.rs, conn.rs): WebGPU exists only on a secure page.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 
 # The page: cce-ui's browser shell, and the browser APIs the trackpad, the
 # keyboard, the two sockets and the frame decoder reach directly.

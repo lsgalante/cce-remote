@@ -26,15 +26,19 @@
 //! the PIN in localStorage after the first pairing.
 
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
+
+use conn::Conn;
 use std::time::Duration;
 
 use cce_core::ipc::ctl::{Request, WindowInfo};
 
+mod conn;
 mod screencopy;
 mod site;
 mod stream;
 mod textfield;
+mod tls;
 mod winstream;
 
 const DEFAULT_PORT: u16 = 17017;
@@ -420,7 +424,7 @@ fn take_screenshot() -> Option<(Vec<u8>, WindowBox)> {
     Some((bytes?, win))
 }
 
-fn handle_ws(stream: TcpStream, pin: &str, ip: std::net::IpAddr, limiter: &RateLimiter) {
+fn handle_ws(stream: Conn, pin: &str, ip: std::net::IpAddr, limiter: &RateLimiter) {
     let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
     // Unauthenticated clients can hold the socket only briefly.
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
@@ -513,7 +517,7 @@ fn handle_ws(stream: TcpStream, pin: &str, ip: std::net::IpAddr, limiter: &RateL
 /// curl-debuggable endpoint, not the page's path. Runs until the client closes
 /// the socket. PIN via X-Pin header or ?pin= query (an <img src> can't carry
 /// headers).
-fn handle_stream(mut stream: TcpStream, request_head: &str, pin: &str, ip: std::net::IpAddr, limiter: &RateLimiter) {
+fn handle_stream(mut stream: Conn, request_head: &str, pin: &str, ip: std::net::IpAddr, limiter: &RateLimiter) {
     if !limiter.allow(ip, std::time::Instant::now()) {
         let _ = write!(stream, "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 30\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         return;
@@ -550,7 +554,7 @@ fn handle_stream(mut stream: TcpStream, request_head: &str, pin: &str, ip: std::
 /// and a separate socket on purpose: frames are 30-150KB and input events are
 /// bytes, so sharing one TCP stream would head-of-line-block pointer motion
 /// behind every frame on a slow link.
-fn handle_wstream(stream: TcpStream, pin: &str, ip: std::net::IpAddr, limiter: &RateLimiter) {
+fn handle_wstream(stream: Conn, pin: &str, ip: std::net::IpAddr, limiter: &RateLimiter) {
     let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
     let mut ws = match tungstenite::accept(stream) {
@@ -589,7 +593,7 @@ fn handle_wstream(stream: TcpStream, pin: &str, ip: std::net::IpAddr, limiter: &
 /// not proceed. Header only: neither is loaded as an `<img src>`, so unlike
 /// `/stream` there is no reason to let the PIN travel in a URL (where it
 /// lands in logs).
-fn header_gate(stream: &mut TcpStream, request_head: &str, pin: &str, ip: std::net::IpAddr, limiter: &RateLimiter) -> bool {
+fn header_gate(stream: &mut Conn, request_head: &str, pin: &str, ip: std::net::IpAddr, limiter: &RateLimiter) -> bool {
     if !limiter.allow(ip, std::time::Instant::now()) {
         let _ = write!(stream, "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 30\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         return false;
@@ -603,7 +607,7 @@ fn header_gate(stream: &mut TcpStream, request_head: &str, pin: &str, ip: std::n
     true
 }
 
-fn handle_http(mut stream: TcpStream, request_head: &str, pin: &str, ip: std::net::IpAddr, limiter: &RateLimiter) {
+fn handle_http(mut stream: Conn, request_head: &str, pin: &str, ip: std::net::IpAddr, limiter: &RateLimiter) {
     if request_head.starts_with("GET /stream") {
         handle_stream(stream, request_head, pin, ip, limiter);
         return;
@@ -689,7 +693,7 @@ fn get_path(request_head: &str) -> Option<&str> {
 }
 
 /// A whole response: `headers` are further header lines, each ending in CRLF.
-fn respond(stream: &mut TcpStream, status: &str, ctype: &str, headers: &str, body: &[u8]) {
+fn respond(stream: &mut Conn, status: &str, ctype: &str, headers: &str, body: &[u8]) {
     let head = format!("HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\n{headers}Connection: close\r\n\r\n", body.len());
     let _ = stream.write_all(head.as_bytes());
     let _ = stream.write_all(body);
@@ -768,25 +772,19 @@ fn main() {
         let pin = pin.clone();
         let limiter = std::sync::Arc::clone(&limiter);
         std::thread::spawn(move || {
-            // Peek the request head without consuming it, so a WS upgrade can
-            // be handed to tungstenite with the handshake bytes intact.
-            let mut buf = [0u8; 1024];
-            let n = match stream.peek(&mut buf) {
-                Ok(n) if n > 0 => n,
-                _ => return,
-            };
-            let head = String::from_utf8_lossy(&buf[..n]).to_string();
+            // Plain or TLS by the first byte (conn.rs). The request head is
+            // read once and kept, so a WS upgrade is handed to tungstenite
+            // with its handshake bytes intact.
+            let Ok(mut stream) = Conn::accept(stream) else { return };
+            let Ok(head) = stream.read_head() else { return };
             if head.starts_with("GET /wstream") {
                 // before /ws: "GET /ws" is a prefix of this
                 handle_wstream(stream, &pin, ip, &limiter);
             } else if head.starts_with("GET /ws") {
                 handle_ws(stream, &pin, ip, &limiter);
             } else {
-                // Consume the request before replying (keeps curl happy).
-                let mut sink = [0u8; 1024];
-                let mut s = stream;
-                let _ = s.read(&mut sink);
-                handle_http(s, &head, &pin, ip, &limiter);
+                stream.consume_head();
+                handle_http(stream, &head, &pin, ip, &limiter);
             }
         });
     }

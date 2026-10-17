@@ -1,0 +1,36 @@
+#!/bin/sh
+# cce-remote-cert [domain] — get, or renew when due, the Let's Encrypt
+# certificate cce-remote serves HTTPS with (src/tls.rs). With no domain it
+# renews the one already there; the first run names it:
+#
+#     cce-remote-cert remote.example.com
+#
+# The name must resolve to this machine's tailnet address. It is proven over
+# DNS (lego's DNS-01, Cloudflare), so nothing has to be reachable from the
+# internet: the token, which needs Zone:DNS:Edit on the domain's zone, is
+# read from ~/.config/cce/cloudflare-dns.token (0600). The server notices a
+# renewed certificate by itself; there is nothing to restart.
+#
+# Run daily by cce-remote-cert.timer; lego renews only when the certificate
+# is near its end, so a run that has nothing to do is quick and harmless.
+set -eu
+dir=${XDG_DATA_HOME:-$HOME/.local/share}/cce-remote/lego
+token=${XDG_CONFIG_HOME:-$HOME/.config}/cce/cloudflare-dns.token
+domain=${1:-}
+if [ -z "$domain" ]; then
+    for crt in "$dir"/certificates/*.crt; do
+        case $crt in *.issuer.crt) continue ;; esac
+        [ -f "$crt" ] && domain=$(basename "$crt" .crt) && break
+    done
+fi
+if [ -z "$domain" ]; then
+    echo "cce-remote-cert: no certificate yet; run: cce-remote-cert <domain>" >&2
+    exit 2
+fi
+if [ ! -s "$token" ]; then
+    echo "cce-remote-cert: no Cloudflare token at $token" >&2
+    exit 2
+fi
+CF_DNS_API_TOKEN=$(tr -d '[:space:]' < "$token")
+export CF_DNS_API_TOKEN
+exec lego --log.format text run --path "$dir" --accept-tos --dns cloudflare --domains "$domain"

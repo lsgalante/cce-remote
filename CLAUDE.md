@@ -29,6 +29,9 @@ The server:
   frame→command translator.
 - **`src/site.rs`** — what a browser is handed besides the sockets: the two pages, the
   page's code (embedded from `build.rs`'s output), the DE's config and fonts.
+- **`src/conn.rs`** / **`src/tls.rs`** — one accepted connection, plain or TLS by its
+  first byte, with its request head kept for replay; and the certificate it is served
+  with (see "HTTPS" below).
 - **`src/stream.rs`** — live-view delivery: the latest-wins `Slot`, the ack-clocked
   sender and its adaptation ladder, and the producer that picks a frame source.
 - **`src/screencopy.rs`** — a persistent `wlr-screencopy` client (frame source #2), and
@@ -133,8 +136,8 @@ addresses many budgets — a /22 LAN is a thousand addresses, hours to walk the 
 space instead of a year. The price is that whoever drains it locks out a paired phone
 too until it refills; `many_addresses_share_one_global_budget` pins both halves.
 
-Be honest about what is left rather than treating the PIN as security: it still travels
-over **plain HTTP**, is compared non-constant-time, is cached in `localStorage`, and for
+Be honest about what is left rather than treating the PIN as security: unless the page
+is opened over HTTPS (below), it travels over **plain HTTP**; it is compared non-constant-time, is cached in `localStorage`, and for
 `/stream` it rides in a URL, where it lands in any proxy or history that sees it. On a
 network someone else can watch, one observed pairing is keyboard control of the
 desktop. So since 2026-10-01 the tunnel is the default rather than advice: the listener
@@ -146,6 +149,36 @@ spoofing a 100.x source never sees the SYN-ACK, which routes into the tunnel. Fi
 rather than binding the tailnet address keeps working when Tailscale comes up after
 this service. `--lan` / `CCE_REMOTE_LAN=1` restores every interface for a trusted
 network.
+
+### HTTPS: the same port, by the first byte
+
+The cce-ui page needs a **secure page** — WebGPU does not exist on plain `http://`, so
+there the loader can only send the phone to `/classic`. So the server also speaks TLS
+on its own port (since 2026-10-17): `Conn::accept` peeks the first byte, and a TLS
+ClientHello (0x16, which no HTTP request starts with) gets a rustls session while
+anything else stays plain. The classic page keeps its plain-HTTP address; the app is
+at `https://<name>:17017/`. The tailnet gate (`reachable`) runs before either, on the
+raw socket, unchanged.
+
+- **The certificate is Let's Encrypt's, proven over DNS**: `scripts/cce-remote-cert`
+  runs lego with a DNS-01 challenge through Cloudflare (token in
+  `~/.config/cce/cloudflare-dns.token`, Zone:DNS:Edit on that zone only), so the name
+  only has to *resolve* to the tailnet address — nothing listens on the internet. The
+  name is the user's (`remote.lucas.co`, an A record to the machine's 100.x address);
+  the first run names it, later runs renew whatever is in lego's directory.
+- **Renewal needs no restart.** `cce-remote-cert.timer` runs the script daily (lego
+  renews inside the last 30 days), and `tls::config` re-stats the files per connection
+  and reloads when they change — keeping the last good config if a reload fails
+  half-written.
+- **No certificate, no HTTPS**: `tls::config` is `None`, a ClientHello is refused, and
+  the server is exactly the plain-HTTP one it was.
+- **The head is read, not peeked**, because a TLS stream cannot be peeked: `read_head`
+  reads through the blank line and keeps the bytes, and reads replay them first, so
+  tungstenite still sees a WebSocket's whole handshake. The 10s open timeout covers the
+  handshake and the head — a client that connects and sends nothing no longer holds a
+  thread forever, as the old blocking `peek` let it.
+- Pages use `wss://` on an https page and `ws://` otherwise (a browser refuses a plain
+  socket from a secure page): `net::url` in the app, `WS` in `classic.html`.
 
 ## Framing: the control socket is one-shot
 
@@ -297,7 +330,7 @@ mapping is gone: view-mode input is trackpad-identical — taps click where the 
 
 ## The page: a cce-ui app in the browser
 
-The phone loads `/`: `web/index.html` (a full-page canvas, the keyboard's textarea) and
+The phone loads `/` — **over HTTPS** (see "HTTPS" above): `web/index.html` (a full-page canvas, the keyboard's textarea) and
 its loader `web/app.js`, which checks for WebGPU — **none, and it goes to `/classic`**,
 since cce-ui draws with nothing else (an iPhone needs iOS 26) — then asks for the PIN
 if it has none, fetches `/boot` (the font list), `/config` and the fonts, all behind
@@ -379,12 +412,13 @@ The awkward part: **there is no WebSocket client on this machine** (no `websocat
 be driven from a real phone, or by writing a throwaway client.
 
 The pure functions are the exception, and they are where the crate's invariants are
-actually enforced, so they carry all the tests (`cargo test -p cce-remote`, 35 of them:
-21 in `main.rs`, 6 in `stream.rs`, 5 in `textfield.rs`, 3 in `site.rs`) —
+actually enforced, so they carry all the tests (`cargo test -p cce-remote`, 37 of them:
+21 in `main.rs`, 6 in `stream.rs`, 5 in `textfield.rs`, 3 in `site.rs`, 2 in `conn.rs`) —
 `translate()` for what a paired client may say, the three PIN gates for who is paired
 at all, in `stream.rs` the `Slot`'s latest-wins semantics plus `adapt()`/`LADDER`, in
 `textfield.rs` the field-switch grace (`decide`) and the click's activation wait
-(`wait_opened`), and in `site.rs` the font resolution and the caching headers. They
+(`wait_opened`), in `site.rs` the font resolution and the caching headers, and in
+`conn.rs` the head replay. They
 cover the accepted shapes and — more to the point — everything that
 must be refused: unknown verbs *including the compositor's own command names*,
 malformed and missing arguments, `wf` targets outside `safe_token`, unwhitelisted `cmd`
@@ -495,6 +529,11 @@ it restarts only the ones whose `/proc/<pid>/exe` reads `(deleted)`; `--all` res
 them regardless. Editing the page (`src/web`, `web/`, `classic.html`) counts as a code
 change for this purpose — it is embedded, so the page only updates once the binary is
 rebuilt, reinstalled *and* the service restarted.
+
+`cce-remote-cert.timer` (and the oneshot `.service` it runs) ships from this crate root
+too, with `scripts/cce-remote-cert`; `ccebuild` installs both but does not enable the
+timer — `systemctl --user enable --now cce-remote-cert.timer` once, after the first
+`cce-remote-cert <name>`.
 
 The unit was unversioned until 2026-08-22 — a hand-written file that existed only in
 `~/.config/systemd/user/`, in no repo, and so lost on a fresh clone with nothing here to
