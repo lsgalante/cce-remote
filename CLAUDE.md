@@ -483,7 +483,8 @@ Code Agent window is doing with each (working / needs you / open) or its age, a 
 "+ new"; a tap opens a session's transcript (replies as wrapped text, each tool call one
 row, a failed call's error), a waiting permission prompt's card (Deny / Always /
 Allow; a question takes only Skip — it wants answers the page does not offer), and a
-prompt strip with Keyboard and Send; a `⋯` menu with Stop (while a turn runs), Show on
+prompt strip with Send (an arrow) at its right, as in Messages — a tap on the strip places
+the caret and raises the keyboard; a `⋯` menu with Stop (while a turn runs), Show on
 desktop (`open`), New session in its folder, and Archive (confirmed). Text draws above
 every shape, so rows under the open menu are clipped at its left edge (`uncovered`).
 "‹ Trackpad" goes back. While it is on, `app.rs` hands it layout, paint and
@@ -512,9 +513,18 @@ short of the advance by the side bearings, and a caret placed by it drifted off 
   fourth tick, since each answer runs `cce-code-agent` over the session files. A reply
   repaints only when it changed something (the list's raw JSON, the transcript's
   version), as every poll on this page.
-- **Typing**: while a prompt is being written (a session or a new one, not read-only),
-  `kb.rs` hands its input to `agent::compose`, which edits the draft instead of sending
-  keycodes; Enter is a new line, Send sends.
+- **Typing is native**: while a prompt is being written (a session or a new one, not
+  read-only), `kb::sync_mode` puts the keyboard's textarea in **text mode** — it holds
+  the draft itself, autocorrect / autocapitalize / spellcheck on, nothing prevented —
+  and reads the value and selection back on `input` and `selectionchange`
+  (`agent::edited`). That is what makes iOS's autocorrect, predictions, dictation and
+  the space bar's press-and-hold trackpad work: each needs real text in a real field,
+  which the sentinel (keys mode, for the desktop) never is. The strip draws the draft's
+  lines around the caret, the selection and the caret from those offsets
+  (`wrap_ranges`, byte ranges so a caret finds its line); the textarea is
+  `white-space: pre`, so the trackpad's up and down move by line breaks rather than
+  by the hidden 1px box's columns. Enter is a new line, Send sends. Leaving a prompt
+  drops its keyboard and re-arms the sentinel.
 - **Text** wraps by character count (`src/wrap.rs`, tested natively): the face is the
   desktop's monospace one. Markdown shows as written — cce-ui's Markdown layout measures
   with a font set of its own, which on the page would lack the `/boot` fonts.

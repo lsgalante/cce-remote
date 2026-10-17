@@ -13,6 +13,17 @@
 //! Shift held around shifted ones), so typing reaches the desktop as key
 //! presses, whatever app has focus.
 //!
+//! **Text mode**, while a Code Agent prompt is being written (`sync_mode`):
+//! the textarea holds the draft itself, with autocorrect, capitalisation and
+//! spellcheck on, and nothing is prevented. iOS edits it natively, so its
+//! autocorrect, predictions, dictation and the space bar's trackpad (press
+//! and hold, then slide the caret) all work; the page reads the value and
+//! the selection back (`input`, `selectionchange`) and the Agent view draws
+//! them. The sentinel's Backspace problem is moot there: an empty prompt has
+//! nothing to delete. Lines break only at line breaks (`white-space: pre`
+//! in index.html), so the trackpad's up and down move by them, not by the
+//! hidden 1px-wide box's columns.
+//!
 //! The keyboard rises only from a focus made inside the user's own gesture:
 //! the keyboard button and the type bar (cce-ui buttons, whose clicks run in
 //! the `pointerup` handler) and a trackpad tap that opened a field
@@ -20,13 +31,20 @@
 //! raised, never one opened with the keyboard button — as cce-compositor's
 //! `osk.rs` leaves a board summoned by hand.
 
+use std::cell::Cell;
+
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{HtmlTextAreaElement, InputEvent};
 
-use super::net;
-use super::state;
+use super::{agent, net, state};
 use crate::predict::Edit;
+use crate::wrap::{byte_to_utf16, utf16_to_byte};
+
+thread_local! {
+    /// The textarea holds a prompt's text (true) or the sentinel (false).
+    static TEXT_MODE: Cell<bool> = const { Cell::new(false) };
+}
 
 const SENTINEL: &str = "········";
 
@@ -42,6 +60,61 @@ fn arm(kb: &HtmlTextAreaElement) {
     kb.set_value(SENTINEL);
     let end = SENTINEL.encode_utf16().count() as u32;
     let _ = kb.set_selection_range(end, end);
+}
+
+fn text_mode() -> bool {
+    TEXT_MODE.with(Cell::get)
+}
+
+/// The textarea as the screen wants it: the prompt's text while one is
+/// being written, else the sentinel. Called before every layout (so before
+/// any tap that raises the keyboard), cheap when nothing changed. Leaving a
+/// prompt drops the keyboard that was for it.
+pub fn sync_mode() {
+    let want = agent::composing();
+    if want == text_mode() {
+        return;
+    }
+    TEXT_MODE.with(|t| t.set(want));
+    let kb = kb();
+    let on = if want { "on" } else { "off" };
+    let _ = kb.set_attribute("autocorrect", on);
+    let _ = kb.set_attribute("autocomplete", on);
+    let _ = kb.set_attribute("spellcheck", if want { "true" } else { "false" });
+    let _ = kb.set_attribute("autocapitalize", if want { "sentences" } else { "off" });
+    if want {
+        show_draft(&kb);
+    } else {
+        if is_up() {
+            let _ = kb.blur();
+        }
+        arm(&kb);
+    }
+}
+
+/// The draft and its selection into the textarea.
+fn show_draft(kb: &HtmlTextAreaElement) {
+    let (draft, a, b) = agent::draft();
+    if kb.value() != draft {
+        kb.set_value(&draft);
+    }
+    let _ = kb.set_selection_range(byte_to_utf16(&draft, a), byte_to_utf16(&draft, b));
+}
+
+/// The draft changed outside the keyboard (Send cleared it, a tap placed
+/// the caret): the textarea follows.
+pub fn draft_changed() {
+    if text_mode() {
+        show_draft(&kb());
+    }
+}
+
+/// The textarea's text and selection, as bytes, into the draft.
+fn read_back(kb: &HtmlTextAreaElement) {
+    let text = kb.value();
+    let a = utf16_to_byte(&text, kb.selection_start().ok().flatten().unwrap_or(0));
+    let b = utf16_to_byte(&text, kb.selection_end().ok().flatten().unwrap_or(0));
+    agent::edited(text, a, b);
 }
 
 pub fn is_up() -> bool {
@@ -94,7 +167,11 @@ pub fn install() {
     let kb = kb();
     let k = kb.clone();
     let focus = Closure::<dyn FnMut()>::new(move || {
-        arm(&k);
+        if text_mode() {
+            show_draft(&k);
+        } else {
+            arm(&k);
+        }
         state::with(|s| s.kb_up = true);
         state::changed();
     });
@@ -107,13 +184,32 @@ pub fn install() {
         state::changed();
     });
     let input = Closure::<dyn FnMut(InputEvent)>::new(move |e: InputEvent| {
+        // Text mode: the browser edits, `edited` reads it back.
+        if text_mode() {
+            return;
+        }
         e.prevent_default();
         on_input(&e.input_type(), e.data().as_deref().unwrap_or(""));
         state::changed();
     });
     let k = kb.clone();
+    let edited = Closure::<dyn FnMut()>::new(move || {
+        if text_mode() {
+            read_back(&k);
+            state::changed();
+        }
+    });
+    // The space bar's trackpad, a selection: the caret moves, nothing is typed.
+    let k = kb.clone();
+    let selected = Closure::<dyn FnMut()>::new(move || {
+        if text_mode() && is_up() {
+            read_back(&k);
+            state::changed();
+        }
+    });
+    let k = kb.clone();
     let drift = Closure::<dyn FnMut()>::new(move || {
-        if is_up() && k.value() != SENTINEL {
+        if is_up() && !text_mode() && k.value() != SENTINEL {
             arm(&k);
         }
         // A prediction the desktop never reflected gives way to its report.
@@ -124,6 +220,10 @@ pub fn install() {
     let _ = kb.add_event_listener_with_callback("focus", focus.as_ref().unchecked_ref());
     let _ = kb.add_event_listener_with_callback("blur", blur.as_ref().unchecked_ref());
     let _ = kb.add_event_listener_with_callback("beforeinput", input.as_ref().unchecked_ref());
+    let _ = kb.add_event_listener_with_callback("input", edited.as_ref().unchecked_ref());
+    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+        let _ = doc.add_event_listener_with_callback("selectionchange", selected.as_ref().unchecked_ref());
+    }
     let _ = web_sys::window()
         .unwrap()
         .set_interval_with_callback_and_timeout_and_arguments_0(drift.as_ref().unchecked_ref(), 1000);
@@ -131,14 +231,12 @@ pub fn install() {
     focus.forget();
     blur.forget();
     input.forget();
+    edited.forget();
+    selected.forget();
     drift.forget();
 }
 
 fn on_input(kind: &str, data: &str) {
-    // Writing a Code Agent prompt: the text is the draft's, not the desktop's.
-    if super::agent::compose(kind, data) {
-        return;
-    }
     match kind {
         "insertText" | "insertReplacementText" => {
             for ch in data.chars() {

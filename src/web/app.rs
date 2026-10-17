@@ -287,6 +287,9 @@ impl RemoteApp {
     /// Lay the frame out from the state: which bands show, where the pad
     /// and the panel are, what the panel lists.
     fn layout(&mut self) {
+        // The keyboard's textarea as this screen wants it (a prompt's text,
+        // or the sentinel), before any tap on it can raise the keyboard.
+        kb::sync_mode();
         self.corners = screen_corners();
         let [it, ir, ib, il] = safe_insets();
         let frame = Rect { x: il, y: it, width: (self.width - il - ir).max(0.0), height: (self.height - it - ib).max(0.0) };

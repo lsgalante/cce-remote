@@ -6,7 +6,8 @@
 //! its age; a folder's `+` starts a new session there. **A session**: its
 //! transcript (replies as wrapped text, tool calls as one row each), a
 //! waiting permission prompt with Deny / Always allow / Allow, and a prompt
-//! strip with the keyboard and Send; a `⋯` menu with the session's actions
+//! strip with Send at its right, as Messages has it (a tap on the strip
+//! raises the keyboard and puts the caret there); a `⋯` menu with the session's actions
 //! (Stop while a turn runs, show it on the desktop, a new session in its
 //! folder, Archive). With no Code Agent window on the desktop the server
 //! answers from disk and the view is read-only (the user's choice).
@@ -18,8 +19,9 @@
 //! one costs a short reply).
 //!
 //! Its data is a thread-local of its own (`DATA`): the socket's listener
-//! and the keyboard (which writes the draft while a prompt is being
-//! written, `compose`) reach it outside the app, as they reach `state`.
+//! and the keyboard (whose textarea holds the draft while a prompt is being
+//! written, and edits it natively: `kb::sync_mode`, [`edited`]) reach it
+//! outside the app, as they reach `state`.
 //! The same rule holds: no DOM calls inside [`with`].
 //!
 //! Text wraps by character count: the page's face is the desktop's
@@ -41,7 +43,7 @@ use wasm_bindgen::JsCast;
 use super::app::shaped;
 use super::icons::icon;
 use super::{kb, net, state};
-use crate::wrap::wrap;
+use crate::wrap::{line_of, wrap, wrap_ranges};
 
 type Btn = Handle<Adapted<Button>>;
 
@@ -141,6 +143,9 @@ struct Data {
     /// A line at the top: an error from the server, or what was done.
     note: Option<(String, bool)>,
     draft: String,
+    /// The draft's selection, as byte offsets (equal: the caret), as the
+    /// keyboard's textarea has it.
+    sel: (usize, usize),
     next_n: u64,
     asked: HashMap<u64, Asked>,
     /// A list or transcript request is out: the timer waits for it.
@@ -170,7 +175,7 @@ pub fn is_on() -> bool {
 }
 
 /// Writing a prompt: the keyboard's text is the draft's, not the desktop's.
-fn composing() -> bool {
+pub fn composing() -> bool {
     with(|d| d.on && matches!(d.screen, Some(Screen::Session { .. } | Screen::New { .. })) && !d.readonly_screen())
 }
 
@@ -249,7 +254,10 @@ pub fn place() -> Option<(Screen, String)> {
 /// Back where a reload left it. The page is not paired yet, so the first
 /// request is dropped; [`reconnected`] asks again.
 pub fn restore(screen: Screen, draft: String) {
-    with(|d| d.draft = draft);
+    with(|d| {
+        d.sel = (draft.len(), draft.len());
+        d.draft = draft;
+    });
     open(screen);
 }
 
@@ -447,26 +455,19 @@ pub fn on_reply(json: &str) {
     }
 }
 
-/// The keyboard's input while a prompt is being written: it edits the
-/// draft and says so (the keyboard then sends nothing to the desktop).
-pub fn compose(kind: &str, data: &str) -> bool {
-    if !composing() {
-        return false;
-    }
-    with(|d| match kind {
-        "insertText" | "insertReplacementText" => d.draft.push_str(data),
-        "insertLineBreak" | "insertParagraph" => d.draft.push('\n'),
-        "deleteContentBackward" => {
-            d.draft.pop();
-        }
-        "deleteWordBackward" => {
-            let t = d.draft.trim_end();
-            let cut = t.rfind(char::is_whitespace).map_or(0, |i| i + 1);
-            d.draft.truncate(cut);
-        }
-        _ => {}
+/// The draft and its selection, for the keyboard's textarea.
+pub fn draft() -> (String, usize, usize) {
+    with(|d| (d.draft.clone(), d.sel.0, d.sel.1))
+}
+
+/// The keyboard's textarea, edited (or its caret moved): its text and
+/// selection are the draft's.
+pub fn edited(text: String, a: usize, b: usize) {
+    with(|d| {
+        let n = text.len();
+        d.draft = text;
+        d.sel = (a.min(n), b.min(n));
     });
-    true
 }
 
 // ── Painting helpers.
@@ -595,8 +596,8 @@ pub struct View {
     menu_acts: Vec<MenuAct>,
     menu_open: bool,
     menu: Option<Rect>,
+    /// Right of the strip, an arrow; lit while there is a draft to send.
     send: Btn,
-    kbd: Btn,
     deny: Btn,
     always: Btn,
     allow: Btn,
@@ -604,6 +605,8 @@ pub struct View {
     body: Rect,
     card: Option<Rect>,
     strip: Option<Rect>,
+    /// The strip's lines as painted: top, and the draft's byte range.
+    strip_lines: Vec<(f32, usize, usize)>,
     scroll: f32,
     /// The body's rows, in content coordinates, for taps.
     hits: Vec<(Rect, Hit)>,
@@ -635,8 +638,10 @@ impl View {
             menu_acts: Vec::new(),
             menu_open: false,
             menu: None,
-            send: button(ui, "Send"),
-            kbd: button(ui, "Keyboard"),
+            send: match icon("arrow-up", ICON_PX, fg()) {
+                Some(id) => ui.insert(Button::new(0.0, 0.0, 0.0, 0.0).with_icon(id, ICON, ICON)),
+                None => button(ui, "Send"),
+            },
             deny: button(ui, "Deny"),
             always: button(ui, "Always"),
             allow: button(ui, "Allow"),
@@ -644,6 +649,7 @@ impl View {
             body: Rect::ZERO,
             card: None,
             strip: None,
+            strip_lines: Vec::new(),
             scroll: 0.0,
             hits: Vec::new(),
             content_h: 0.0,
@@ -673,7 +679,7 @@ impl View {
             return;
         }
         let at = |r: Rect| Rect { x: r.x + dx, y: r.y + dy, ..r };
-        let mut buttons = vec![self.back, self.more, self.send, self.kbd, self.deny, self.always, self.allow];
+        let mut buttons = vec![self.back, self.more, self.send, self.deny, self.always, self.allow];
         buttons.extend(self.menu_rows.iter().copied());
         for b in buttons {
             let Some((x, y, bw, bh)) = ui.get_widget(b.id()).map(|w| w.rect()) else { continue };
@@ -752,20 +758,19 @@ impl View {
         let line_h = (size * 1.45).ceil();
         let mut bottom = h - pad;
         self.strip = None;
-        for b in [self.send, self.kbd] {
-            Self::place(ui, b, OFF);
-        }
+        Self::place(ui, self.send, OFF);
         if writing {
+            // The strip grows with the draft (to DRAFT_LINES); Send stays at
+            // its right, level with its last line, as in Messages.
             let draft = with(|d| d.draft.clone());
-            let cols = ((w - 2.0 * pad - 2.0 * pad) / cw) as usize;
+            let sw = w - 2.0 * pad - BTN_H - gap;
+            let cols = ((sw - 2.0 * pad) / cw) as usize;
             let lines = wrap(&draft, cols).len().clamp(1, DRAFT_LINES);
-            let row_y = bottom - BTN_H;
-            let bw = (w - 2.0 * pad - gap) / 2.0;
-            Self::place(ui, self.kbd, Rect { x: pad, y: row_y, width: bw, height: BTN_H });
-            Self::place(ui, self.send, Rect { x: pad + bw + gap, y: row_y, width: bw, height: BTN_H });
-            self.roots.extend([self.kbd.id(), self.send.id()]);
-            let sh = lines as f32 * line_h + pad;
-            let strip = Rect { x: pad, y: row_y - gap - sh, width: w - 2.0 * pad, height: sh };
+            let sh = (lines as f32 * line_h + pad).max(BTN_H);
+            let strip = Rect { x: pad, y: bottom - sh, width: sw, height: sh };
+            Self::place(ui, self.send, Rect { x: w - pad - BTN_H, y: bottom - BTN_H, width: BTN_H, height: BTN_H });
+            ui[self.send].selected = !draft.trim().is_empty();
+            self.roots.push(self.send.id());
             self.strip = Some(strip);
             bottom = strip.y - gap;
         }
@@ -815,9 +820,6 @@ impl View {
                 _ => go(Screen::List),
             }
         }
-        if ui[self.kbd].take_click() {
-            kb::toggle();
-        }
         let tr = with(|d| d.tr.clone());
         if ui[self.more].take_click() {
             self.menu_open = !self.menu_open;
@@ -849,7 +851,11 @@ impl View {
                     }
                     Screen::List => {}
                 }
-                with(|d| d.draft.clear());
+                with(|d| {
+                    d.draft.clear();
+                    d.sel = (0, 0);
+                });
+                kb::draft_changed();
                 self.stick_bottom = true;
             }
         }
@@ -880,9 +886,15 @@ impl View {
         if (x - px).abs() > TAP_SLOP || (y - py).abs() > TAP_SLOP {
             return;
         }
-        // The prompt strip is a field: a tap on it raises the keyboard.
+        // The prompt strip is a field: a tap on it puts the caret there and
+        // raises the keyboard.
         if self.strip.is_some_and(|s| contains(s, x, y)) {
+            if let Some(at) = self.strip_index(x, y) {
+                with(|d| d.sel = (at, at));
+                kb::draft_changed();
+            }
             kb::open();
+            state::changed();
             return;
         }
         if !contains(self.body, x, y) {
@@ -899,6 +911,17 @@ impl View {
             Some(Hit::NewIn(cwd, label)) => go(Screen::New { cwd, label }),
             None => {}
         }
+    }
+
+    /// Where in the draft a tap on the strip falls: the nearest char
+    /// boundary on the line it is on, as the paint shaped it.
+    fn strip_index(&self, x: f32, y: f32) -> Option<usize> {
+        let s = self.strip?;
+        let (family, size) = font();
+        let draft = with(|d| d.draft.clone());
+        let &(_, a, b) = self.strip_lines.iter().rev().find(|(top, _, _)| y >= *top).or(self.strip_lines.first())?;
+        let run = shaped(&draft[a..b], &family, size);
+        Some(a + run.index_at(x - s.x - cce_ui::layout::plate_padding()))
     }
 
     /// A drag (the page reads one as a wheel) scrolls the body.
@@ -1124,27 +1147,38 @@ impl View {
                 }
             }
         }
-        // The prompt strip: the draft, its last lines, and a caret.
+        // The prompt strip: the draft's lines around the caret, the
+        // selection, and the caret, where the keyboard's textarea has them
+        // (the space bar's trackpad moves it there).
+        self.strip_lines.clear();
         if let Some(s) = self.strip {
             pc.canvas_well(s, cce_ui::layout::control_corner_radius(), &Material::pane(), cce_ui::layout::control_relief(), false);
             let cols = ((s.width - 2.0 * inset) / cw) as usize;
-            let all = wrap(&draft, cols);
-            let shown = &all[all.len().saturating_sub(DRAFT_LINES)..];
-            let mut ly = s.y + inset * 0.5;
+            let (sa, sb) = with(|d| (d.sel.0.min(d.sel.1), d.sel.0.max(d.sel.1)));
+            let caret = with(|d| d.sel.1);
+            let all = wrap_ranges(&draft, cols);
+            let first = line_of(&all, caret).saturating_sub(DRAFT_LINES - 1).min(all.len().saturating_sub(DRAFT_LINES));
+            // One line: level with Send. More: from the strip's top.
+            let top = if all.len() == 1 { s.y + (s.height - line_h) / 2.0 } else { s.y + inset * 0.5 };
             if draft.is_empty() {
-                line(pc, "Message Claude…", s.x + inset, ly, line_h, size, dim(), uncovered(s, self.menu, ly, line_h));
+                line(pc, "Message Claude…", s.x + inset, top, line_h, size, dim(), uncovered(s, self.menu, top, line_h));
             }
-            for l in shown {
-                line(pc, l, s.x + inset, ly, line_h, size, fg(), uncovered(s, self.menu, ly, line_h));
-                ly += line_h;
-            }
-            if kb::is_up() {
-                // After the last line's glyphs as shaped, not a count of
-                // characters times a width.
-                let last = shown.last().map_or(0.0, |l| shaped(l, &family, size).x_of(l.len()));
-                let cx = s.x + inset + last - 1.0;
-                let cy = s.y + inset * 0.5 + (shown.len().max(1) - 1) as f32 * line_h + line_h * 0.15;
-                pc.quad(Rect { x: cx, y: cy, width: 2.0, height: line_h * 0.7 }, lin(WAITING));
+            let up = kb::is_up();
+            for (i, &(a, b)) in all.iter().enumerate().skip(first).take(DRAFT_LINES) {
+                let ly = top + (i - first) as f32 * line_h;
+                self.strip_lines.push((ly, a, b));
+                let text = &draft[a..b];
+                let run = shaped(text, &family, size);
+                let x0 = s.x + inset;
+                if sa < sb && sa <= b && sb >= a {
+                    let (l, r) = (run.x_of(sa.clamp(a, b) - a), run.x_of(sb.clamp(a, b) - a));
+                    pc.quad(Rect { x: x0 + l, y: ly + line_h * 0.12, width: (r - l).max(2.0), height: line_h * 0.76 }, [WAITING[0], WAITING[1], WAITING[2], 0.3]);
+                }
+                line(pc, text, x0, ly, line_h, size, fg(), uncovered(s, self.menu, ly, line_h));
+                if up && sa == sb && line_of(&all, caret) == i {
+                    let cx = x0 + run.x_of(caret.clamp(a, b) - a) - 1.0;
+                    pc.quad(Rect { x: cx, y: ly + line_h * 0.15, width: 2.0, height: line_h * 0.7 }, lin(WAITING));
+                }
             }
         }
         // The session menu, over everything.

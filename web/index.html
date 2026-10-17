@@ -33,7 +33,8 @@
           padding: env(safe-area-inset-top) env(safe-area-inset-right) var(--safe-b, env(safe-area-inset-bottom)) env(safe-area-inset-left); }
   /* The phone keyboard's target (src/web/kb.rs): focusable but out of
      sight. Not display:none, which could not take focus. */
-  #kb { position: absolute; opacity: 0.02; width: 1px; height: 1px; left: -10px; top: -10px; font-size: 16px; }
+  #kb { position: absolute; opacity: 0.02; width: 1px; height: 1px; left: -10px; top: -10px; font-size: 16px;
+        white-space: pre; overflow: hidden; }
   #note { position: fixed; inset: 0; display: none; place-items: center; padding: 24px;
           color: #ccccd4; font: 16px/1.5 ui-monospace, Menlo, monospace; text-align: center; }
 </style>
