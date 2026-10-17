@@ -23,6 +23,7 @@ mod state;
 
 use cce_ui::web::{Fonts, Sizing};
 use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
 
 /// Run the remote on `canvas`. `fonts` is an array of font files' bytes,
 /// `families` the generic serif / sans-serif / monospace families as
@@ -35,6 +36,7 @@ pub async fn start(canvas: web_sys::HtmlCanvasElement, fonts: js_sys::Array, fam
     if !config.is_empty() {
         cce_ui::color::reload_colors(&config);
     }
+    match_page_to_plate();
     state::init(pin);
     let mut fonts = Fonts::new(fonts.iter().map(|f| js_sys::Uint8Array::new(&f).to_vec()).collect());
     let mut names = families.split(',').map(|f| Some(f.trim()).filter(|f| !f.is_empty()).map(String::from));
@@ -42,6 +44,25 @@ pub async fn start(canvas: web_sys::HtmlCanvasElement, fonts: js_sys::Array, fam
     fonts.sans_serif = names.next().flatten();
     fonts.monospace = names.next().flatten();
     cce_ui::web::run::<app::RemoteApp>(canvas, fonts, Sizing::Page).await
+}
+
+/// The page behind the canvas in the root plate's colour, as the plate
+/// shows over it (it may be translucent, and the canvas is composited
+/// premultiplied): where the canvas does not reach — the band a home-screen
+/// app's short viewport leaves under it — the page reads as the app, not a
+/// gap.
+fn match_page_to_plate() {
+    const PAGE: [f32; 3] = [0x14 as f32 / 255.0, 0x15 as f32 / 255.0, 0x1c as f32 / 255.0];
+    let t = cce_ui::color::to_srgb(cce_ui::scene::Material::root().tint);
+    let a = t[3].clamp(0.0, 1.0);
+    let [r, g, b] = [0, 1, 2].map(|i| ((t[i] * a + PAGE[i] * (1.0 - a)).clamp(0.0, 1.0) * 255.0).round() as u8);
+    let css = format!("#{r:02x}{g:02x}{b:02x}");
+    let Some(doc) = web_sys::window().and_then(|w| w.document()) else { return };
+    for el in [doc.document_element(), doc.body().map(Into::into)].into_iter().flatten() {
+        if let Some(el) = el.dyn_ref::<web_sys::HtmlElement>() {
+            let _ = el.style().set_property("background", &css);
+        }
+    }
 }
 
 /// The next frame read back from the GPU, as `[width, height, rgba]`: how a

@@ -19,8 +19,11 @@ const note = (text) => {
 //
 // Opened from the home screen (navigator.standalone), iOS sizes the viewport
 // as if the status bar took room although the page starts under it: 873 of
-// a 932px screen, the last 59 (the status bar's height) bare page. There
-// the canvas is the screen's height rather than the viewport's (--app-h).
+// a 932px screen, and nothing is drawn below it, not even a canvas sized
+// past it (that cut the click buttons off where the screen's corners
+// start). So the canvas stays the viewport, the band under it is painted
+// the app's colour (src/web/mod.rs), and the bottom safe area, which lies
+// in that band, is not kept clear (--safe-b: the home indicator is below).
 const vv = window.visualViewport;
 const fit = () => {
   // A few px of difference is the viewport's rounding, not a keyboard
@@ -31,10 +34,10 @@ const fit = () => {
   root.setProperty('--kb', kb + 'px');
   const portrait = window.innerHeight >= window.innerWidth;
   const screenH = portrait ? Math.max(screen.width, screen.height) : Math.min(screen.width, screen.height);
-  if (navigator.standalone && !kb && screenH > window.innerHeight) {
-    root.setProperty('--app-h', screenH + 'px');
+  if (navigator.standalone && screenH - window.innerHeight > 20) {
+    root.setProperty('--safe-b', '0px');
   } else {
-    root.removeProperty('--app-h');
+    root.removeProperty('--safe-b');
   }
   if (window.scrollY) window.scrollTo(0, 0);
 };
