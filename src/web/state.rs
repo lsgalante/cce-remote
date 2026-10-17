@@ -96,6 +96,9 @@ pub struct State {
     /// What the desktop field holds, as its app last reported it (`tt`):
     /// text and the caret's and anchor's byte offsets in it.
     pub field_text: Option<Field>,
+    /// Bumped on every report, so a reader can tell a new one (`kb`'s
+    /// mirror) from one it has seen.
+    pub field_seq: u64,
     /// Edits typed here that the last report does not reflect yet: the strip
     /// shows them at once (`crate::predict`), and a later report retires them.
     pub pending: Vec<Edit>,
@@ -133,6 +136,7 @@ impl State {
             self.pending_at = now_ms();
         }
         self.field_text = now;
+        self.field_seq += 1;
     }
 
     /// Drop predictions the desktop has not reflected in time. Whether
@@ -182,6 +186,7 @@ pub fn init(pin: String) {
             kb_up: false,
             typed: String::new(),
             field_text: None,
+            field_seq: 0,
             pending: Vec::new(),
             pending_at: 0.0,
             mods: Vec::new(),

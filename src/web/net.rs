@@ -134,6 +134,7 @@ fn on_input_message(text: &str) {
         return;
     } else if let Some(rest) = text.strip_prefix("tt") {
         state::with(|s| s.confirm_field(parse_contents(rest)));
+        super::kb::reported();
     } else if let Some(json) = text.strip_prefix("ag ") {
         // The Agent view's replies (agent.rs repaints for them).
         super::agent::on_reply(json);
@@ -227,7 +228,9 @@ pub fn send(frame: &str) {
 /// Left-click, and say whether that click opened a desktop text field.
 ///
 /// A SYNCHRONOUS `POST /click`: the server clicks, waits up to 150ms for a
-/// field to activate, and answers `1`/`0`. It has to block, because the
+/// field to activate, and answers `1`/`0` — with an opened field's contents
+/// as a second line, a `tt` frame, so the keyboard's autocorrect can be set
+/// by them before it comes up. It has to block, because the
 /// caller is the tap's own event handler, and iOS raises the keyboard only
 /// for a focus made inside one — a WS reply arrives after the tap is over.
 /// Not paired: no click (as the input socket would send none).
@@ -238,7 +241,19 @@ pub fn click_opened_field() -> bool {
     if x.open_with_async("POST", "/click", false).is_err() || x.set_request_header("X-Pin", &pin).is_err() || x.send().is_err() {
         return false;
     }
-    x.status().is_ok_and(|s| s == 200) && x.response_text().ok().flatten().is_some_and(|t| t == "1")
+    if !x.status().is_ok_and(|s| s == 200) {
+        return false;
+    }
+    let body = x.response_text().ok().flatten().unwrap_or_default();
+    let (opened, contents) = body.split_once('\n').unwrap_or((&body, ""));
+    if opened != "1" {
+        return false;
+    }
+    // The field's contents, ahead of the input socket's `tt`.
+    if let Some(rest) = contents.strip_prefix("tt") {
+        state::with(|s| s.confirm_field(parse_contents(rest)));
+    }
+    true
 }
 
 // ── The live view ───────────────────────────────────────────────────────

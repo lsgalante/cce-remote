@@ -80,6 +80,11 @@ fn publish_contents(now: Option<Contents>) {
     }
 }
 
+/// The field's contents now, as a `tt` frame would carry them.
+pub fn contents() -> Option<Contents> {
+    CONTENTS.lock().unwrap().1.clone()
+}
+
 /// The field's contents, if they changed since the reader's count `seen`:
 /// the new count and contents (`None` when there are none to show).
 pub fn contents_since(seen: u64) -> Option<(u64, Option<Contents>)> {
@@ -238,10 +243,12 @@ impl Dispatch<ZwpInputMethodV2, ()> for ImState {
                 state.sensitive = sensitive(hint, purpose);
             }
             zwp_input_method_v2::Event::Done => {
-                publish(state.pending, state.activated);
-                state.activated = false;
+                // The contents first: a `/click` woken by the activation
+                // answers with them (main.rs), so they must be there.
                 let shown = state.pending && !state.sensitive;
                 publish_contents(state.contents.clone().filter(|_| shown));
+                publish(state.pending, state.activated);
+                state.activated = false;
             }
             zwp_input_method_v2::Event::Unavailable => state.unavailable = true,
             _ => {}

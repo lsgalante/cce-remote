@@ -29,7 +29,6 @@ use cce_ui::widget::{Adapted, Button, ElementState, Event, Handle, KeyEvent, Mou
 use super::icons::icon;
 use super::state::{self, Conn, Msg, Overlay};
 use super::{agent, kb, net, pad};
-use crate::predict::Edit;
 
 /// A key or button row's height: a comfortable thumb target.
 const BTN_H: f32 = 40.0;
@@ -440,16 +439,10 @@ impl RemoteApp {
 
         for act in acts {
             match act {
-                Action::Key(code) => {
-                    // The arrows the strip can follow on one line; the rest
-                    // (Esc, Tab, Up, Down) it cannot.
-                    kb::predict(match code {
-                        105 => Edit::Left,
-                        106 => Edit::Right,
-                        _ => Edit::Opaque,
-                    });
-                    net::send(&format!("k {code}"));
-                }
+                // Sent by the keyboard, whose strip and mirror follow the
+                // arrows Left and Right (the rest, Esc, Tab, Up, Down, they
+                // cannot).
+                Action::Key(code) => kb::key_button(code),
                 Action::Mod(code) => {
                     let on = state::with(|s| {
                         let on = !s.mods.contains(&code);

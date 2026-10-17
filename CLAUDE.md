@@ -310,7 +310,10 @@ GTK, Qt and browser fields.
   alone shows the bar rather than calling `kb.focus()`.
 - **So a left tap's click is a SYNCHRONOUS `POST /click`.** The server performs the
   fixed `b left click` (through `translate()`), then waits on `textfield::wait_opened`
-  for an activation, up to `CLICK_FIELD_WAIT` (150ms), and answers `1`/`0`; the page,
+  for an activation, up to `CLICK_FIELD_WAIT` (150ms), and answers `1`/`0` — a `1` with
+  the field's contents as a second line, the `tt` frame the socket would send (so the
+  keyboard's autocorrect is set by them before it comes up; `textfield` publishes the
+  contents before waking the waiter for this); the page,
   still inside `touchend`, focuses the keyboard on `1`. Activations measured 1-16ms
   after the click, so a `1` costs almost nothing — but **every tap that opens nothing
   freezes the page for the full wait** plus a round trip. That is the price; keep the
@@ -346,6 +349,42 @@ round trip instead made the strip trail a fast typist visibly; `FIELD_POLL` drop
 **A field whose content type is a password or PIN, or hints hidden or sensitive text, is
 never passed on** (`sensitive`), whatever its app sends — cce-ui's password box reports
 nothing anyway, but GTK's and others' are only known by their content type.
+
+**Typing to the desktop goes through a mirror of the field** (since 2026-10-17;
+`kb.rs`, `src/mirror.rs`). The keyboard's textarea holds a copy of the desktop field —
+the reported contents, or for a field that reports none (a terminal) what was typed
+since it opened — and iOS edits it natively; each change is diffed against the copy and
+replayed as keys: arrows to the change's end, Backspace over what it replaced, the new
+characters (`mirror::plan`; the common prefix stops at the desktop's caret, so a run of
+one letter does not misplace an edit). A caret move alone (the space bar's
+press-and-hold trackpad) is arrows; a selection is not given to the desktop, and a later
+edit is replayed over it from the caret. That is what gives the desktop iOS's
+autocorrect, predictions and space-bar caret, none of which can work on a field whose
+every edit is prevented. Rules that keep it honest:
+
+- **Autocorrect only where the field reports its contents.** One that reports none is a
+  terminal, near enough, where `ls` corrected is `Is`; there it is off, and so is
+  capitalisation. iOS reads these traits as the keyboard comes up, so `prepare` sets
+  them before every focus — hence the contents on `/click`'s answer.
+- **The mirror keeps an expectation** (the report it was built from, every key since
+  applied with `predict::apply`), and a NEW report that disagrees, once the keys have
+  been quiet 400ms, is the truth: the copy is rebuilt from it (a click moved the caret
+  on the desktop, the app completed a word, Enter submitted). A report count
+  (`state::field_seq`) keeps a stale one from being acted on twice.
+- **Enter, Tab and keys under a latched modifier are not followed**: a reporting field
+  is rebuilt from its next report, a non-reporting one starts over empty (a terminal's
+  Enter runs the line).
+- **What the keys cannot type is folded or left out** (`mirror::fold`): iOS's smart
+  punctuation becomes ASCII (`’` → `'`, `“` → `"`, `—` → `-`, `…` → `...`), anything
+  else outside the US layout is dropped, and the copy takes the folded text so it stays
+  the desktop's.
+
+Checked end to end in a shadow session (a reporting editor and a terminal, the page in
+headless Chromium): typing, a simulated autocorrect replacement, a caret move then an
+insert, Backspace at the field's start, a curly apostrophe, a desktop-side edit
+rebuilding the copy, the arrow buttons, Enter. Real iOS behaviour — its autocorrect, the
+space bar's trackpad, whether a trait change on a focused textarea takes effect before
+the keyboard is next raised — only a phone can show.
 
 Not done, and why: `commit_string` would type Unicode the keycode table cannot, but it
 travels on the Wayland connection while Backspace/Enter go through the control socket,
@@ -431,10 +470,13 @@ keyboard sink lacks the iOS Backspace fix, so:
 
 What carried over from the hand-written page, and must not be "cleaned up":
 
-- **The hidden textarea keeps sentinel padding** (`········`, cursor at the end, re-armed
-  on focus plus a 1s drift-repair timer). iOS never fires `deleteContentBackward` on an
-  empty field, so without something to delete, backspace silently does nothing.
-  `beforeinput` is used throughout because iOS `keydown` reports keyCode 229.
+- **The hidden textarea keeps padding before its text** (`kb::PAD` line breaks, topped
+  up as the caret nears the start). iOS never fires a delete on an empty field, so
+  without something to delete, Backspace at a field's start (or in a terminal, whose
+  text the page never sees) silently does nothing; deleting a pad line break is a
+  Backspace on the desktop. It was a run of `········` with every edit prevented until
+  the mirror (above) replaced that; the padding is what carried over. `keydown` is
+  still never used: iOS reports keyCode 229.
 - **The stream self-heals: reconnect on WS close plus a 30s no-frame watchdog** (the
   frame sources force keepalives ≤20s, so 30s of silence is a dead connection, not an
   idle window). The page only auto-reconnects `/wstream` if that connection *paired
@@ -519,12 +561,13 @@ short of the advance by the side bearings, and a caret placed by it drifted off 
   and reads the value and selection back on `input` and `selectionchange`
   (`agent::edited`). That is what makes iOS's autocorrect, predictions, dictation and
   the space bar's press-and-hold trackpad work: each needs real text in a real field,
-  which the sentinel (keys mode, for the desktop) never is. The strip draws the draft's
+  which the old prevented sentinel never was (the desktop's typing has the same now,
+  through the mirror above). The strip draws the draft's
   lines around the caret, the selection and the caret from those offsets
   (`wrap_ranges`, byte ranges so a caret finds its line); the textarea is
   `white-space: pre`, so the trackpad's up and down move by line breaks rather than
   by the hidden 1px box's columns. Enter is a new line, Send sends. Leaving a prompt
-  drops its keyboard and re-arms the sentinel.
+  drops its keyboard and returns the textarea to the desktop's mirror.
 - **Text** wraps by character count (`src/wrap.rs`, tested natively): the face is the
   desktop's monospace one. Markdown shows as written — cce-ui's Markdown layout measures
   with a font set of its own, which on the page would lack the `/boot` fonts.
@@ -536,9 +579,10 @@ The awkward part: **there is no WebSocket client on this machine** (no `websocat
 be driven from a real phone, or by writing a throwaway client.
 
 The pure functions are the exception, and they are where the crate's invariants are
-actually enforced, so they carry all the tests (`cargo test -p cce-remote`, 43 of them:
+actually enforced, so they carry all the tests (`cargo test -p cce-remote`, 55 of them:
 21 in `main.rs`, 6 in `stream.rs`, 7 in `textfield.rs`, 3 in `site.rs`, 2 in `conn.rs`,
-4 in `predict.rs`) —
+4 in `predict.rs`, 6 in `mirror.rs`, 3 in `wrap.rs`; the last three are the library's,
+pure and compiled natively) —
 `translate()` for what a paired client may say, the three PIN gates for who is paired
 at all, in `stream.rs` the `Slot`'s latest-wins semantics plus `adapt()`/`LADDER`, in
 `textfield.rs` the field-switch grace (`decide`), the click's activation wait

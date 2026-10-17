@@ -690,10 +690,22 @@ fn handle_http(mut stream: Conn, request_head: &str, pin: &str, ip: std::net::Ip
         for cmd in translate("b left click").unwrap_or_default() {
             let _ = control_command(&cmd);
         }
-        let opened = if textfield::wait_opened(before, CLICK_FIELD_WAIT) { "1" } else { "0" };
+        // An opened field's contents ride along, as the `tt` frame the input
+        // socket would send them in (password fields already left out): the
+        // page sets the keyboard's autocorrect by them, which iOS reads only
+        // as the keyboard comes up, before that frame would arrive.
+        let body = if textfield::wait_opened(before, CLICK_FIELD_WAIT) {
+            match textfield::contents() {
+                Some(c) => format!("1\ntt {} {} {}", c.cursor, c.anchor, c.text),
+                None => "1".to_string(),
+            }
+        } else {
+            "0".to_string()
+        };
         let _ = write!(
             stream,
-            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nCache-Control: no-store\r\nContent-Length: 1\r\nConnection: close\r\n\r\n{opened}"
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
         );
         return;
     }
