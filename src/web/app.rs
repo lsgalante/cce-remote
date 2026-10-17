@@ -211,6 +211,11 @@ fn label_font() -> (String, f32) {
 /// them. Read from `#safe` (index.html), whose padding is the `env()`
 /// insets. Above the keyboard the bottom one is the keyboard's: the canvas
 /// already ends where it begins.
+///
+/// Each is less the root plate's own inset, which the layout puts inside
+/// the frame anyway: both keep the controls off the screen's edge, and
+/// stacked they left a band below the click buttons. So the controls end
+/// at the safe area's line, not a plate inset short of it.
 fn safe_insets() -> [f32; 4] {
     let Some(window) = web_sys::window() else { return [0.0; 4] };
     let Some(doc) = window.document() else { return [0.0; 4] };
@@ -222,7 +227,8 @@ fn safe_insets() -> [f32; 4] {
     let Some(st) = doc.get_element_by_id("safe").and_then(|e| window.get_computed_style(&e).ok().flatten()) else { return [0.0; 4] };
     let side = |name: &str| px(st.get_property_value(name).unwrap_or_default());
     let bottom = if kb > 0.0 { 0.0 } else { side("padding-bottom") };
-    [side("padding-top"), side("padding-right"), bottom, side("padding-left")]
+    let plate = cce_ui::layout::root_plate_inset();
+    [side("padding-top"), side("padding-right"), bottom, side("padding-left")].map(|v| (v - plate).max(0.0))
 }
 
 /// One line of `text` as the paint shapes it: where the caret stands at

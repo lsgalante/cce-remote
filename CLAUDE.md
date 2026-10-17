@@ -375,8 +375,9 @@ the PIN, and starts the app. Everything after `start()` is Rust.
 **The canvas covers the whole screen, safe areas included** (since 2026-10-17; it used
 to stop at them, leaving bands of bare page above and below): the app reads the insets
 from `#safe`, a hidden div padded by `env(safe-area-inset-*)` (`app::safe_insets`), and
-lays both views out in the canvas less them, so the root plate reaches the edges and no
-control sits under the notch or the home indicator. With the keyboard up the canvas
+lays both views out in the canvas less them (less the root plate's own inset, which
+the layout adds inside: stacked, the two left a band under the click buttons), so the
+root plate reaches the edges and the controls end at the safe areas' lines. With the keyboard up the canvas
 ends at the keyboard, and the bottom inset is dropped.
 
 **The app paints; it does not read the pad or the keyboard.** cce-ui's browser shell

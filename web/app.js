@@ -19,7 +19,10 @@ const note = (text) => {
 const vv = window.visualViewport;
 if (vv) {
   const fit = () => {
-    const kb = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+    // A few px of difference is the viewport's rounding, not a keyboard
+    // (none is that short): read as one, it left a sliver of bare page.
+    const gap = window.innerHeight - vv.height - vv.offsetTop;
+    const kb = gap > 80 ? gap : 0;
     document.documentElement.style.setProperty('--kb', kb + 'px');
     if (window.scrollY) window.scrollTo(0, 0);
   };
