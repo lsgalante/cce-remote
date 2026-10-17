@@ -181,6 +181,8 @@ pub struct RemoteApp {
     pad_rect: Rect,
     overlay_rect: Option<Rect>,
     typebar_shown: bool,
+    /// The screen's corner radii where the canvas meets them (`screen_corners`).
+    corners: (Option<f32>, Option<f32>),
 }
 
 const ROW1: usize = 5;
@@ -233,6 +235,30 @@ fn safe_insets() -> [f32; 4] {
     [side("padding-top"), side("padding-right"), bottom, side("padding-left")].map(|v| (v - plate).max(0.0))
 }
 
+/// The screen's corner radius at the canvas's top and bottom corners, where
+/// they are the screen's own (app.js: a home-screen app, its bottom ones
+/// while the keyboard is down); `None` where the DE's window radius holds.
+fn screen_corners() -> (Option<f32>, Option<f32>) {
+    let Some(window) = web_sys::window() else { return (None, None) };
+    let Some(st) = window.document().and_then(|d| d.document_element()).and_then(|e| window.get_computed_style(&e).ok().flatten()) else {
+        return (None, None);
+    };
+    let px = |name: &str| st.get_property_value(name).ok().and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok()).filter(|r| *r > 0.0);
+    (px("--corner-top"), px("--corner-bottom"))
+}
+
+/// The root plate, its corners the screen's where they meet it: what
+/// `PaintCtx::root_plate` draws (the same rect, material, roll and nominal
+/// window radius), with those corners' radii swapped in. Nominal, as
+/// `Prim::Plate` takes them: the span factor widens each into the squircle
+/// the screen's continuous corner is.
+fn root_plate(pc: &mut PaintCtx, width: f32, height: f32, corners: (Option<f32>, Option<f32>)) {
+    let window = cce_ui::layout::window_corner_radius();
+    let (top, bottom) = (corners.0.unwrap_or(window), corners.1.unwrap_or(window));
+    let material = Material::root().for_role(cce_ui::scene::PlateRole::Root);
+    pc.plate(Rect { x: 0.0, y: 0.0, width, height }, (top, top, bottom, bottom), &material, cce_ui::layout::bevel_width());
+}
+
 /// One line of `text` as the paint shapes it: where the caret stands at
 /// each char boundary. `measure_text_width` is an inked extent, not an
 /// advance, and a caret placed by it walked off the glyphs it followed.
@@ -261,6 +287,7 @@ impl RemoteApp {
     /// Lay the frame out from the state: which bands show, where the pad
     /// and the panel are, what the panel lists.
     fn layout(&mut self) {
+        self.corners = screen_corners();
         let [it, ir, ib, il] = safe_insets();
         let frame = Rect { x: il, y: it, width: (self.width - il - ir).max(0.0), height: (self.height - it - ib).max(0.0) };
         if agent::is_on() {
@@ -698,6 +725,7 @@ impl Application for RemoteApp {
             pad_rect: Rect::ZERO,
             overlay_rect: None,
             typebar_shown: false,
+            corners: (None, None),
         }
     }
 
@@ -733,7 +761,7 @@ impl Application for RemoteApp {
         }
 
         let mut pc = PaintCtx::new();
-        pc.root_plate(self.width, self.height);
+        root_plate(&mut pc, self.width, self.height, self.corners);
         if agent::is_on() {
             self.agent.paint(&self.ui, &mut pc);
             return Some(pc.finish());

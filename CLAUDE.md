@@ -396,6 +396,16 @@ lies in the bare band, is not kept clear. That app's viewport shrinks with the k
 (a tab's does not), so the keyboard is detected against the tallest height seen at the
 width (`--kb-up`, which `app::safe_insets` reads), not against `innerHeight`.
 
+**The root plate's corners are the screen's where they meet it** (since 2026-10-17): in
+the home-screen app the top two, and the bottom two while the keyboard is down (the
+canvas then reaches the screen's bottom). No web API gives a screen's corner radius, so
+`app.js` looks it up by screen size (`SCREEN_CORNERS`, from iOS's private
+`_displayCornerRadius` as community tables collect it: 55 for 430×932) and sets
+`--corner-top` / `--corner-bottom`; `app::root_plate` draws `PaintCtx::root_plate`'s plate
+with those nominal radii swapped in. Elsewhere (a Safari tab, an unknown size) the DE's
+window radius holds — which on the page is cce-ui's built-in 12, since
+`window_corner_radius` reads the config file from disk and a browser has none.
+
 **The app paints; it does not read the pad or the keyboard.** cce-ui's browser shell
 follows one finger and reads it as a touchscreen does (tap, scroll, held drag), and its
 keyboard sink lacks the iOS Backspace fix, so:

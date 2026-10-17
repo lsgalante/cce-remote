@@ -32,6 +32,21 @@ const note = (text) => {
 const vv = window.visualViewport;
 const standalone = navigator.standalone === true || matchMedia('(display-mode: standalone)').matches;
 if (standalone) document.documentElement.dataset.standalone = 'true';
+// The screen's corner radius, which no web API gives: by the screen's size
+// in points, from the values iOS reports for its own (UIScreen's private
+// _displayCornerRadius, as collected by ScreenCorners and device_geometry).
+// Where a size is shared by phones of two radii, the nearer to both.
+const SCREEN_CORNERS = {
+  '375x812': 41, // X, XS, 11 Pro (39); 12 mini, 13 mini (44)
+  '414x896': 41.5, // XR, 11, XS Max, 11 Pro Max
+  '390x844': 47.33, // 12, 12 Pro, 13, 13 Pro, 14
+  '428x926': 53.33, // 12 Pro Max, 13 Pro Max, 14 Plus
+  '393x852': 55, // 14 Pro, 15, 15 Pro, 16
+  '430x932': 55, // 14 Pro Max, 15 Plus, 15 Pro Max, 16 Plus
+  '402x874': 62, // 16 Pro, 17, 17 Pro
+  '440x956': 62, // 16 Pro Max, 17 Pro Max
+};
+const screenCorner = SCREEN_CORNERS[Math.min(screen.width, screen.height) + 'x' + Math.max(screen.width, screen.height)];
 let tallest = { w: 0, h: 0 };
 const fit = () => {
   const visible = vv ? vv.height + vv.offsetTop : window.innerHeight;
@@ -50,6 +65,12 @@ const fit = () => {
   } else {
     root.removeProperty('--safe-b');
   }
+  // The root plate's corners where the canvas meets the screen's (app.rs,
+  // screen_corners): a home-screen app's top ones, and its bottom ones while
+  // the canvas reaches the screen's bottom (not above the keyboard).
+  const corner = (on, name) => on && screenCorner ? root.setProperty(name, screenCorner + 'px') : root.removeProperty(name);
+  corner(standalone, '--corner-top');
+  corner(standalone && Math.abs(window.innerHeight - screenH) <= 2, '--corner-bottom');
   if (window.scrollY) window.scrollTo(0, 0);
 };
 fit();
