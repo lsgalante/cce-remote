@@ -133,6 +133,10 @@ fn on_input_message(text: &str) {
         return;
     } else if let Some(rest) = text.strip_prefix("tt") {
         state::with(|s| s.confirm_field(parse_contents(rest)));
+    } else if let Some(json) = text.strip_prefix("ag ") {
+        // The Agent view's replies (agent.rs repaints for them).
+        super::agent::on_reply(json);
+        return;
     } else if let Some(json) = text.strip_prefix("windows ") {
         if !on_windows(json) {
             return;

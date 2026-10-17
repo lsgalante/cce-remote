@@ -8,3 +8,5 @@ mod web;
 
 /// The echo strip's keystroke prediction: pure, so tested natively.
 pub mod predict;
+/// The Agent view's text wrapping: pure, so tested natively.
+pub mod wrap;

@@ -23,6 +23,8 @@ path = "src/main.rs"
 # GUI-free, without the KDL config.
 cce-core = { git = "https://github.com/lsgalante/cce-core.git", rev = "cfe7a9307866896bdd1dd4319c44a6cb6f33db21", default-features = false, features = ["json"] }
 tungstenite = "0.21"
+# The Agent view's frames and Code Agent's socket replies (agent.rs).
+serde_json = "1"
 wayland-client = "0.31"
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 # input-method-v2: told when a desktop text field opens (textfield.rs)
@@ -36,6 +38,8 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # The page: cce-ui's browser shell, and the browser APIs the trackpad, the
 # keyboard, the two sockets and the frame decoder reach directly.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+# The Agent view's replies (web/agent.rs).
+serde_json = "1"
 cce-ui = { git = "https://github.com/lsgalante/cce-ui.git", rev = "bfafde060f994e35e7c1fcd5ae177125f6bcaa99" }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"

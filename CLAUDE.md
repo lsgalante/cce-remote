@@ -40,6 +40,8 @@ The server:
 - **`src/winstream.rs`** — consumer of the compositor's window-stream socket (source #1).
 - **`src/textfield.rs`** — a listen-only `input-method-v2` client: whether a desktop
   text field is open, for the page's "tap to type" bar.
+- **`src/agent.rs`** — the Agent view's requests (`ag <json>` frames), checked,
+  rebuilt and carried to Code Agent's control sockets (see "The Agent view").
 
 So the server is a Wayland client twice over: screencopy per stream, and one
 input-method registration for the life of the process.
@@ -47,7 +49,7 @@ input-method registration for the life of the process.
 The page (`src/web`; see "The page" below): `app.rs` (the cce-ui `Application`),
 `state.rs` (what the page knows, shared with its listeners), `net.rs` (the two sockets,
 frame decoding, `/click`), `pad.rs` (the trackpad), `kb.rs` (the phone keyboard),
-`icons.rs` (cce-icons glyphs, compiled in). `web/` holds its HTML shell, its loader
+`icons.rs` (cce-icons glyphs, compiled in), `agent.rs` (the Agent view). `web/` holds its HTML shell, its loader
 (`app.js`) and the glyph SVGs; `build.rs` builds it.
 
 ## The invariant: the control socket is a full-privilege injection channel
@@ -430,6 +432,44 @@ as before.
 `SCROLL = 0.8`, not the 0.045 it started as: axis values reach clients as surface-px
 deltas, so near-unity is the trackpad-like 1:1 feel. A 300px swipe used to scroll one line.
 
+## The Agent view: Code Agent's sessions on the phone
+
+The menu's "Code Agent sessions" row swaps the page for the Agent view
+(`src/web/agent.rs`): every session on disk by folder (archived ones left out), what a
+Code Agent window is doing with each (working / needs you / open) or its age, a folder's
+"+ new"; a tap opens a session's transcript (replies as wrapped text, each tool call one
+row, a failed call's error), a waiting permission prompt's card (Deny / Always /
+Allow; a question takes only Skip — it wants answers the page does not offer), and a
+prompt strip with Keyboard and Send; Stop while a turn runs, Archive (confirmed) when
+none does. "‹ Trackpad" goes back. While it is on, `app.rs` hands it layout, paint and
+events, and publishes the pad as empty, so `pad.rs` takes no touches.
+
+- **The second injection channel.** Code Agent (cce-code-agent) listens on
+  `$XDG_RUNTIME_DIR/cce/code-agent/<pid>.sock` per window, one JSON request per
+  connection (its `remote.rs`). The page's `ag <json>` frames go there through
+  `src/agent.rs`, under the same rule as `translate()`: `parse` takes a fixed set of
+  shapes (list, transcript, send, stop, answer, archive, open), every id checked by
+  `token`, the prompt capped at 64 KB, and `Op::line` rebuilds the request from the
+  checked values alone. A prompt's text does reach Code Agent as text, as typed keys
+  reach the desktop: it is what a paired phone is for.
+- **Routing** (`agent::run`): a session open in a window is that window's; one that is
+  not opens in the newest window (send, open, archive). With no window, the list and a
+  transcript come from `cce-code-agent --list` / `--transcript <id>` and the view is
+  read-only (the user's choice: nothing starts on the desktop from the phone). The
+  frame is answered on a thread of its own, its reply drained by `handle_ws`'s loop
+  (`agent_rx`), so the trackpad never waits behind a window's answer.
+- **Polling**: every `POLL_MS` (1.2 s) while the view is open, the list or the open
+  transcript (with `since`, so an unchanged one is a short reply); read-only, every
+  fourth tick, since each answer runs `cce-code-agent` over the session files. A reply
+  repaints only when it changed something (the list's raw JSON, the transcript's
+  version), as every poll on this page.
+- **Typing**: while a prompt is being written (a session or a new one, not read-only),
+  `kb.rs` hands its input to `agent::compose`, which edits the draft instead of sending
+  keycodes; Enter is a new line, Send sends.
+- **Text** wraps by character count (`src/wrap.rs`, tested natively): the face is the
+  desktop's monospace one. Markdown shows as written — cce-ui's Markdown layout measures
+  with a font set of its own, which on the page would lack the `/boot` fonts.
+
 ## Verifying
 
 The awkward part: **there is no WebSocket client on this machine** (no `websocat`, no
@@ -490,6 +530,20 @@ the same new-document script instead. Run the server in the shadow on a spare po
 `CCE_FONTS_DIR` set (a shadow's HOME is its own, so the DE's fonts are not found).
 Expect software WebGPU to be slow — the live view pegs a dozen cores — which a phone's
 GPU is not.
+
+**The Agent view was checked this way** (2026-10-17), against Code Agent run in the
+shadow with its fake CLI and a server on a spare port, with two harness findings worth
+keeping. Playwright's Node module is not installed (its browsers are, under
+`~/.cache/ms-playwright`), so drive that Chromium over CDP from plain Node (`fetch`
+`/json/list`, then the page target's `webSocketDebuggerUrl` with Node's own `WebSocket`).
+**Click with `Input.dispatchMouseEvent`, not emulated touch**: after a
+`dispatchTouchEvent` tap, and after the Agent view had been shown, `capture()` never
+resolved (no GPU error, no exception) — so the Agent view was verified by its effects
+(console traces of each request and reply, and the session's state read back from
+Code Agent's socket) rather than by pixels. A workspace build also failed at start-up
+while cce-core had an uncommitted `std::process::id()` on a path the page reaches
+(it panics on wasm32); a standalone build (`git archive HEAD` or a copy, built outside
+the workspace with its own lock) sidesteps the workspace's patched checkouts.
 
 **Injected input lands in the live session** — pointer moves steer the user's real
 cursor and keystrokes go into whatever they have focused. To exercise the input path

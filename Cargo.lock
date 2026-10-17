@@ -195,6 +195,7 @@ dependencies = [
  "memmap2 0.9.11",
  "rustix 0.38.44",
  "rustls",
+ "serde_json",
  "tungstenite",
  "wasm-bindgen",
  "wasm-bindgen-futures",

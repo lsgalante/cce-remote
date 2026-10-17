@@ -127,6 +127,10 @@ pub fn install() {
 }
 
 fn on_input(kind: &str, data: &str) {
+    // Writing a Code Agent prompt: the text is the draft's, not the desktop's.
+    if super::agent::compose(kind, data) {
+        return;
+    }
     match kind {
         "insertText" | "insertReplacementText" => {
             for ch in data.chars() {

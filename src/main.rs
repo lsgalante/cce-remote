@@ -33,6 +33,7 @@ use std::time::Duration;
 
 use cce_core::ipc::ctl::{Request, WindowInfo};
 
+mod agent;
 mod conn;
 mod screencopy;
 mod site;
@@ -487,6 +488,10 @@ fn handle_ws(stream: Conn, pin: &str, ip: std::net::IpAddr, limiter: &RateLimite
     // and has seen no contents.
     let mut field_sent = false;
     let mut contents_seen = 0u64;
+    // The Agent view's replies (`agent`), made on threads of their own: a
+    // window's answer or `cce-code-agent --list` can take most of a second,
+    // and the trackpad must not wait behind it.
+    let (agent_tx, agent_rx) = std::sync::mpsc::channel::<String>();
     loop {
         let msg = match ws.read() {
             Ok(msg) => Some(msg),
@@ -519,8 +524,22 @@ fn handle_ws(stream: Conn, pin: &str, ip: std::net::IpAddr, limiter: &RateLimite
             }
             contents_seen = seen;
         }
+        while let Ok(reply) = agent_rx.try_recv() {
+            if ws.send(tungstenite::Message::Text(reply)).is_err() {
+                break;
+            }
+        }
         if let Some(tungstenite::Message::Text(text)) = msg {
-            if text.trim() == "wl" {
+            if let Some(frame) = text.strip_prefix("ag ") {
+                // Code Agent's socket, not the compositor's: agent.rs checks
+                // and rebuilds the request, as translate() does for commands.
+                let (frame, tx) = (frame.to_string(), agent_tx.clone());
+                std::thread::spawn(move || {
+                    if let Some(reply) = agent::handle(&frame) {
+                        let _ = tx.send(reply);
+                    }
+                });
+            } else if text.trim() == "wl" {
                 // Window-list request: the one message with a reply.
                 let _ = ws.send(tungstenite::Message::Text(window_list_json()));
             } else if text.trim() == "pl" {

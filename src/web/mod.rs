@@ -9,7 +9,9 @@
 //! | `pad` | the trackpad: raw touches into pointer frames |
 //! | `kb` | the phone keyboard's hidden textarea |
 //! | `icons` | the cce-icons glyphs, compiled in |
+//! | `agent` | the Agent view: Code Agent's sessions, a transcript, a prompt |
 
+mod agent;
 mod app;
 mod icons;
 mod kb;

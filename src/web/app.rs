@@ -9,6 +9,10 @@
 //! into it); and the two click buttons. The switcher and the menu are a pane
 //! plate over the pad.
 //!
+//! The menu's "Code Agent" row swaps all of that for the Agent view
+//! (`agent.rs`), which lays out, paints and takes the events while it is
+//! on; the pad is then published empty, so `pad.rs` takes no touches.
+//!
 //! The app paints and handles its buttons; it does not read the pad's
 //! touches (`pad.rs` does, before cce-ui sees them) or the keyboard's text
 //! (`kb.rs`). It publishes where the pad and the open panel are, which is
@@ -24,7 +28,7 @@ use cce_ui::widget::{Adapted, Button, ElementState, Event, Handle, KeyEvent, Mou
 
 use super::icons::icon;
 use super::state::{self, Conn, Msg, Overlay};
-use super::{kb, net, pad};
+use super::{agent, kb, net, pad};
 use crate::predict::Edit;
 
 /// A key or button row's height: a comfortable thumb target.
@@ -58,6 +62,8 @@ enum Action {
 enum Row {
     Window(u64),
     ToggleView,
+    /// The Agent view: Code Agent's sessions.
+    Agent,
     Reload,
     /// Opens the System list.
     System,
@@ -161,6 +167,8 @@ pub struct RemoteApp {
     list_scroll: f32,
     /// The list the panel showed last: another one starts at its top.
     shown_overlay: Option<Overlay>,
+    /// The Agent view's widgets and layout (shown while `agent::is_on`).
+    agent: agent::View,
     /// The widgets that take events this frame.
     roots: Vec<WidgetId>,
 
@@ -216,6 +224,17 @@ impl RemoteApp {
     /// Lay the frame out from the state: which bands show, where the pad
     /// and the panel are, what the panel lists.
     fn layout(&mut self) {
+        if agent::is_on() {
+            self.agent.layout(&mut self.ui, self.width, self.height);
+            self.roots = self.agent.roots().to_vec();
+            // No trackpad and no panel: pad.rs leaves every touch to cce-ui.
+            state::with(|s| {
+                s.pad = Rect::ZERO;
+                s.overlay = None;
+                s.overlay_rect = None;
+            });
+            return;
+        }
         let (typebar, preview, overlay, mods) =
             state::with(|s| (s.field_open && !s.kb_up, s.kb_up, s.overlay, s.mods.clone()));
         let mut arena: Arena<LayoutBox> = Arena::new();
@@ -281,7 +300,7 @@ impl RemoteApp {
         self.row_actions = match overlay {
             None => Vec::new(),
             Some(Overlay::Switcher) => state::with(|s| s.windows.iter().map(|w| Row::Window(w.id)).take(ROWS).collect()),
-            Some(Overlay::Menu) => vec![Row::ToggleView, Row::Reload, Row::System],
+            Some(Overlay::Menu) => vec![Row::ToggleView, Row::Agent, Row::Reload, Row::System],
             Some(Overlay::System) => std::iter::once(Row::Back).chain(Sys::ALL.into_iter().map(Row::Sys)).collect(),
         };
         let (view, windows) = state::with(|s| (s.view, s.windows.clone()));
@@ -309,6 +328,7 @@ impl RemoteApp {
                     (title.unwrap_or_default(), w.is_some_and(|w| w.focused))
                 }
                 Row::ToggleView => ((if view { "Switch to trackpad" } else { "Show focused window (live view)" }).to_string(), false),
+                Row::Agent => ("Code Agent sessions".to_string(), false),
                 Row::Reload => ("Reload page".to_string(), false),
                 Row::System => ("System…".to_string(), false),
                 Row::Back => ("Back".to_string(), false),
@@ -403,6 +423,13 @@ impl RemoteApp {
             match row {
                 Row::Window(id) => net::send(&format!("wf {id}")),
                 Row::ToggleView => Self::set_view(!state::with(|s| s.view)),
+                Row::Agent => {
+                    // The live view's stream is not needed under it.
+                    if state::with(|s| s.view) {
+                        Self::set_view(false);
+                    }
+                    agent::show();
+                }
                 Row::Reload => {
                     let _ = window.location().reload();
                 }
@@ -602,7 +629,9 @@ impl Application for RemoteApp {
         let rows = (0..ROWS)
             .map(|_| ui.insert(Button::new(0.0, 0.0, 0.0, 0.0).with_label("")))
             .collect();
+        let agent = agent::View::new(&mut ui);
         Self {
+            agent,
             ui,
             bar,
             typebar,
@@ -658,6 +687,10 @@ impl Application for RemoteApp {
 
         let mut pc = PaintCtx::new();
         pc.root_plate(self.width, self.height);
+        if agent::is_on() {
+            self.agent.paint(&self.ui, &mut pc);
+            return Some(pc.finish());
+        }
         let mut painted: Vec<WidgetId> = self.bar.iter().map(|(h, _)| h.id()).collect();
         if self.typebar_shown {
             painted.push(self.typebar.id());
@@ -701,6 +734,13 @@ impl Application for RemoteApp {
     fn handle_mouse_input(&mut self, button: MouseButton, state: ElementState, pos: LogicalPosition, needs_rebuild: &mut bool) -> Option<Msg> {
         let ev = Event::MouseButton { button, state, x: pos.x, y: pos.y, local_x: pos.x, local_y: pos.y };
         self.route(&ev);
+        if agent::is_on() {
+            self.agent.drain(&mut self.ui);
+            self.agent.mouse(state == ElementState::Pressed, pos.x, pos.y);
+            self.needs_rebuild = true;
+            *needs_rebuild = true;
+            return None;
+        }
         self.drain();
         *needs_rebuild = true;
         None
@@ -709,6 +749,16 @@ impl Application for RemoteApp {
     /// A drag on the open panel scrolls its list (cce-ui reads a finger's
     /// drag as a scroll).
     fn handle_mouse_wheel(&mut self, delta: &MouseScrollDelta, pos: LogicalPosition, needs_rebuild: &mut bool) {
+        if agent::is_on() {
+            let dy = match delta {
+                MouseScrollDelta::PixelDelta(p) => p.y as f32,
+                MouseScrollDelta::LineDelta(_, y) => *y * ROW_H,
+            };
+            if self.agent.wheel(dy, pos.x, pos.y) {
+                *needs_rebuild = true;
+            }
+            return;
+        }
         let Some(o) = self.overlay_rect else { return };
         if pos.x < o.x || pos.x > o.x + o.width || pos.y < o.y || pos.y > o.y + o.height {
             return;
