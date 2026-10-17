@@ -6,9 +6,10 @@
 //! its age; a folder's `+` starts a new session there. **A session**: its
 //! transcript (replies as wrapped text, tool calls as one row each), a
 //! waiting permission prompt with Deny / Always allow / Allow, and a prompt
-//! strip with the keyboard and Send; Stop while a turn runs, Archive when
-//! none does. With no Code Agent window on the desktop the server answers
-//! from disk and the view is read-only (the user's choice).
+//! strip with the keyboard and Send; a `⋯` menu with the session's actions
+//! (Stop while a turn runs, show it on the desktop, a new session in its
+//! folder, Archive). With no Code Agent window on the desktop the server
+//! answers from disk and the view is read-only (the user's choice).
 //!
 //! The server (`../agent.rs`) carries each request to Code Agent; the
 //! requests go out as `ag <json>` frames on the input socket and come back
@@ -37,6 +38,8 @@ use serde_json::Value;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
+use super::app::shaped;
+use super::icons::icon;
 use super::{kb, net, state};
 use crate::wrap::wrap;
 
@@ -56,6 +59,13 @@ const DRAFT_LINES: usize = 4;
 const ERROR_LINES: usize = 6;
 /// A tap that moved more than this is a drag (a scroll), not a tap.
 const TAP_SLOP: f32 = 12.0;
+/// A state dot's radius; the text beside one starts `list_gap` past it.
+const DOT_R: f32 = 4.0;
+/// The menu glyph's size on its button, and the size it is rasterized at.
+const ICON: f32 = 20.0;
+const ICON_PX: u32 = 64;
+/// The session menu's widest.
+const MENU_W: f32 = 240.0;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Screen {
@@ -255,6 +265,25 @@ fn hide() {
     if kb::is_up() {
         kb::toggle();
     }
+    state::changed();
+}
+
+/// Archived from the phone: the list shows it gone at once, and is asked
+/// for again once the archive is done (the reply's `refresh`). Asked now,
+/// it could be answered before the archive lands, and show the session
+/// again for a poll.
+fn archived_here(id: &str) {
+    with(|d| {
+        for s in d.groups.iter_mut().flat_map(|g| &mut g.sessions).filter(|s| s.id == id) {
+            s.archived = true;
+        }
+        // The next list repaints even if it matches the last one (a failed
+        // archive), which would leave the session hidden.
+        d.list_raw.clear();
+        d.screen = Some(Screen::List);
+        d.note = None;
+        d.in_flight = true;
+    });
     state::changed();
 }
 
@@ -483,6 +512,42 @@ fn state_word(st: &str) -> (&'static str, [f32; 4]) {
     }
 }
 
+/// What a row of the session menu does.
+#[derive(Debug, Clone)]
+enum MenuAct {
+    Stop,
+    /// Make it the shown session of a Code Agent window.
+    Show,
+    New { cwd: String, label: String },
+    Archive,
+}
+
+impl MenuAct {
+    fn label(&self) -> String {
+        match self {
+            MenuAct::Stop => "Stop".into(),
+            MenuAct::Show => "Show on desktop".into(),
+            MenuAct::New { label, .. } => format!("New session in {label}"),
+            MenuAct::Archive => "Archive…".into(),
+        }
+    }
+}
+
+/// Where a text row may draw: `clip`, less what the open menu covers. Text
+/// draws above every shape, so a row under the menu would show through its
+/// plate; a row the menu overlaps is cut off at the menu's left.
+fn uncovered(clip: Rect, menu: Option<Rect>, y: f32, h: f32) -> Rect {
+    match menu {
+        Some(m) if y < m.y + m.height && y + h > m.y => Rect { width: (m.x - clip.x).clamp(0.0, clip.width), ..clip },
+        _ => clip,
+    }
+}
+
+/// The text beside a state dot starts here, from the row's left.
+fn gutter() -> f32 {
+    2.0 * DOT_R + cce_ui::layout::list_gap()
+}
+
 /// A hand-drawn row a tap acts on.
 #[derive(Debug, Clone)]
 enum Hit {
@@ -493,8 +558,13 @@ enum Hit {
 /// The Agent view's widgets and layout, held by the app.
 pub struct View {
     back: Btn,
-    /// Stop while a turn runs, Archive when none does.
-    act: Btn,
+    /// The session menu's `⋯`.
+    more: Btn,
+    /// Its rows, as many as `menu_acts` says are shown.
+    menu_rows: Vec<Btn>,
+    menu_acts: Vec<MenuAct>,
+    menu_open: bool,
+    menu: Option<Rect>,
     send: Btn,
     kbd: Btn,
     deny: Btn,
@@ -524,7 +594,14 @@ impl View {
     pub fn new(ui: &mut UiContext) -> View {
         View {
             back: button(ui, "‹ Trackpad"),
-            act: button(ui, "Stop"),
+            more: match icon("more-horizontal", ICON_PX, fg()) {
+                Some(id) => ui.insert(Button::new(0.0, 0.0, 0.0, 0.0).with_icon(id, ICON, ICON)),
+                None => button(ui, "⋯"),
+            },
+            menu_rows: (0..4).map(|_| button(ui, "")).collect(),
+            menu_acts: Vec::new(),
+            menu_open: false,
+            menu: None,
             send: button(ui, "Send"),
             kbd: button(ui, "Keyboard"),
             deny: button(ui, "Deny"),
@@ -561,24 +638,54 @@ impl View {
         let session = matches!(screen, Screen::Session { .. });
         let writing = matches!(screen, Screen::Session { .. } | Screen::New { .. }) && !readonly;
         self.roots.clear();
-        // Header: back, the title, and Stop / Archive in a session.
+        // Header: back, the title, and a session's menu. The menu needs a
+        // Code Agent window (its actions go to one), not the session's being
+        // open in it: "Show on desktop" is how one is opened.
         let top = pad;
         let back_w = 116.0;
         ui[self.back].set_label(if matches!(screen, Screen::List) { "‹ Trackpad" } else { "‹ Sessions" });
         Self::place(ui, self.back, Rect { x: pad, y: top, width: back_w, height: BTN_H });
         self.roots.push(self.back.id());
-        let act_w = 92.0;
-        let busy = tr.as_ref().is_some_and(|t| t.busy);
-        if session && !readonly {
-            ui[self.act].set_label(if busy { "Stop" } else { "Archive" });
-            Self::place(ui, self.act, Rect { x: w - pad - act_w, y: top, width: act_w, height: BTN_H });
-            self.roots.push(self.act.id());
+        let has_menu = session && !with(|d| d.readonly);
+        if has_menu {
+            Self::place(ui, self.more, Rect { x: w - pad - BTN_H, y: top, width: BTN_H, height: BTN_H });
+            self.roots.push(self.more.id());
         } else {
-            Self::place(ui, self.act, OFF);
+            Self::place(ui, self.more, OFF);
+            self.menu_open = false;
         }
+        ui[self.more].selected = self.menu_open;
         let tx = pad + back_w + gap;
-        let tw = if session && !readonly { w - pad - act_w - gap - tx } else { w - pad - tx };
+        let tw = if has_menu { w - pad - BTN_H - gap - tx } else { w - pad - tx };
         self.title_rect = Rect { x: tx, y: top, width: tw.max(0.0), height: BTN_H };
+        self.menu_acts.clear();
+        self.menu = None;
+        if self.menu_open {
+            if let Screen::Session { id, .. } = &screen {
+                if tr.as_ref().is_some_and(|t| t.busy) {
+                    self.menu_acts.push(MenuAct::Stop);
+                }
+                self.menu_acts.push(MenuAct::Show);
+                if let Some(g) = with(|d| d.groups.iter().find(|g| g.sessions.iter().any(|s| &s.id == id)).cloned()) {
+                    self.menu_acts.push(MenuAct::New { cwd: g.cwd, label: g.label });
+                }
+                self.menu_acts.push(MenuAct::Archive);
+            }
+            let n = self.menu_acts.len() as f32;
+            let mw = MENU_W.min(w - 2.0 * pad);
+            let m = Rect { x: w - pad - mw, y: top + BTN_H + gap, width: mw, height: 2.0 * gap + n * BTN_H + (n - 1.0).max(0.0) * gap };
+            self.menu = Some(m);
+        }
+        for (i, b) in self.menu_rows.clone().into_iter().enumerate() {
+            match (self.menu, self.menu_acts.get(i)) {
+                (Some(m), Some(act)) => {
+                    ui[b].set_label(&act.label());
+                    Self::place(ui, b, Rect { x: m.x + gap, y: m.y + gap + i as f32 * (BTN_H + gap), width: m.width - 2.0 * gap, height: BTN_H });
+                    self.roots.push(b.id());
+                }
+                _ => Self::place(ui, b, OFF),
+            }
+        }
 
         // From the bottom: the prompt strip, then a waiting prompt's card.
         let (family, size) = font();
@@ -653,13 +760,21 @@ impl View {
             kb::toggle();
         }
         let tr = with(|d| d.tr.clone());
-        if ui[self.act].take_click() {
-            if let Screen::Session { id, .. } = &screen {
-                if tr.as_ref().is_some_and(|t| t.busy) {
-                    ask(serde_json::json!({"op": "stop", "id": id}), Asked::Action);
-                } else if web_sys::window().unwrap().confirm_with_message("Archive this session?").unwrap_or(false) {
-                    ask(serde_json::json!({"op": "archive", "id": id, "archived": true}), Asked::Action);
-                    go(Screen::List);
+        if ui[self.more].take_click() {
+            self.menu_open = !self.menu_open;
+        }
+        let picked = self.menu_rows.iter().position(|b| ui[*b].take_click()).and_then(|i| self.menu_acts.get(i).cloned());
+        if let (Some(act), Screen::Session { id, .. }) = (picked, &screen) {
+            self.menu_open = false;
+            match act {
+                MenuAct::Stop => ask(serde_json::json!({"op": "stop", "id": id}), Asked::Action),
+                MenuAct::Show => ask(serde_json::json!({"op": "open", "id": id}), Asked::Action),
+                MenuAct::New { cwd, label } => go(Screen::New { cwd, label }),
+                MenuAct::Archive => {
+                    if web_sys::window().unwrap().confirm_with_message("Archive this session?").unwrap_or(false) {
+                        ask(serde_json::json!({"op": "archive", "id": id, "archived": true}), Asked::Action);
+                        archived_here(id);
+                    }
                 }
             }
         }
@@ -689,13 +804,20 @@ impl View {
         }
     }
 
-    /// A press or release in the body: a tap on a row opens it.
+    /// A press or release in the body: a tap on a row opens it. While the
+    /// menu is open a tap is the menu's: its rows act (`drain`), and one
+    /// anywhere else closes it without reaching the rows beneath.
     pub fn mouse(&mut self, pressed: bool, x: f32, y: f32) {
         if pressed {
-            self.press = Some((x, y));
+            self.press = (!self.menu_open).then_some((x, y));
             return;
         }
-        let Some((px, py)) = self.press.take() else { return };
+        let Some((px, py)) = self.press.take() else {
+            if self.menu.is_some_and(|m| !contains(m, x, y)) {
+                self.menu_open = false;
+            }
+            return;
+        };
         if (x - px).abs() > TAP_SLOP || (y - py).abs() > TAP_SLOP || !contains(self.body, x, y) {
             return;
         }
@@ -727,6 +849,8 @@ impl View {
         let (family, size) = font();
         let small = (size * 0.88).round();
         let cw = char_w(&family, size);
+        let small_cw = char_w(&family, small);
+        let gap = cce_ui::layout::list_gap();
         let line_h = (size * 1.45).ceil();
         let (screen, note, readonly, listed, tr_rev, draft) =
             with(|d| (d.screen.clone().unwrap_or(Screen::List), d.note.clone(), d.readonly_screen(), d.listed, d.tr_rev, d.draft.clone()));
@@ -737,8 +861,9 @@ impl View {
         };
         let t = self.title_rect;
         line(pc, &elide(&title, (t.width / cw) as usize), t.x, t.y, t.height, size, fg(), t);
-        for id in self.roots.clone() {
-            if let Some(w) = ui.get_widget(id) {
+        let menu_ids: Vec<WidgetId> = self.menu_rows.iter().map(|b| b.id()).collect();
+        for id in self.roots.iter().filter(|id| !menu_ids.contains(id)) {
+            if let Some(w) = ui.get_widget(*id) {
                 cce_ui::widget::painter::paint_root_into(ui, w, pc);
             }
         }
@@ -751,7 +876,7 @@ impl View {
         let cols = (inner.width / cw).max(8.0) as usize;
         // Lines to draw, in content coordinates: (y, h, text, colour, x, size).
         let mut rows: Vec<(f32, f32, String, [u8; 3], f32, f32)> = Vec::new();
-        let mut dots: Vec<(f32, f32, [f32; 4])> = Vec::new();
+        let mut dots: Vec<(f32, [f32; 4])> = Vec::new();
         let mut bubbles: Vec<(f32, f32)> = Vec::new();
         let mut hits = Vec::new();
         let mut y = 0.0;
@@ -784,7 +909,10 @@ impl View {
                 let groups = with(|d| d.groups.clone());
                 let writable = !with(|d| d.readonly);
                 for g in &groups {
-                    let shown: Vec<&Sess> = g.sessions.iter().filter(|s| !s.archived || s.state.is_some()).collect();
+                    // Archived is gone, open in a window or not: the desktop's
+                    // sidebar keeps its shown session listed, but here the
+                    // phone archived it and looks for it to go.
+                    let shown: Vec<&Sess> = g.sessions.iter().filter(|s| !s.archived).collect();
                     if shown.is_empty() {
                         continue;
                     }
@@ -798,16 +926,18 @@ impl View {
                         let (right, color) = match &s.state {
                             Some(st) => {
                                 let (word, c) = state_word(st);
-                                dots.push((y + ROW_H / 2.0, 10.0, c));
+                                dots.push((y + ROW_H / 2.0, c));
                                 (word.to_string(), [(c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8])
                             }
                             None if s.elsewhere.is_some() => ("elsewhere".into(), dim()),
                             None => (ago(s.active), dim()),
                         };
-                        let rcols = right.chars().count() + 1;
-                        let tcols = cols.saturating_sub(rcols + 3);
-                        rows.push((y, ROW_H, elide(&s.title, tcols), fg(), 2.0 * cw, size));
-                        rows.push((y, ROW_H, right.clone(), color, inner.width - rcols as f32 * cw, small));
+                        // The title between the dot's gutter and the state
+                        // word, a list gap clear of each.
+                        let right_w = right.chars().count() as f32 * small_cw;
+                        let tcols = ((inner.width - gutter() - right_w - gap) / cw).max(0.0) as usize;
+                        rows.push((y, ROW_H, elide(&s.title, tcols), fg(), gutter(), size));
+                        rows.push((y, ROW_H, right.clone(), color, inner.width - right_w, small));
                         hits.push((Rect { x: inset, y, width: inner.width - 8.0 * cw, height: ROW_H }, Hit::Session(s.id.clone(), s.title.clone())));
                         y += ROW_H;
                     }
@@ -844,11 +974,12 @@ impl View {
                                         "stopped" => STOPPED,
                                         _ => DONE,
                                     };
-                                    dots.push((y + line_h / 2.0, 0.0, c));
-                                    rows.push((y, line_h, elide(&format!("{}  {}", e.name, e.summary), cols.saturating_sub(2)), fg(), 2.0 * cw, size));
+                                    dots.push((y + line_h / 2.0, c));
+                                    let tool_cols = ((inner.width - gutter()) / cw) as usize;
+                                    rows.push((y, line_h, elide(&format!("{}  {}", e.name, e.summary), tool_cols), fg(), gutter(), size));
                                     y += line_h;
                                     if e.state == "failed" && !e.output.trim().is_empty() {
-                                        text_block(&mut rows, &mut y, e.output.trim(), dim(), 2.0 * cw, cols.saturating_sub(2), ERROR_LINES);
+                                        text_block(&mut rows, &mut y, e.output.trim(), dim(), gutter(), tool_cols, ERROR_LINES);
                                     }
                                 }
                                 _ => text_block(&mut rows, &mut y, &e.text, if e.error { [0xff, 0x8a, 0x80] } else { dim() }, 0.0, cols, 0),
@@ -878,15 +1009,15 @@ impl View {
             for (by, bh) in &bubbles {
                 pc.rounded_rect(Rect { x: inner.x, y: oy + by, width: inner.width, height: *bh }, 8.0, (true, true, true, true), BUBBLE);
             }
-            for (cy, dx, c) in &dots {
-                pc.circle(inner.x + dx.max(cw * 0.6), oy + cy, 4.0, lin(*c));
+            for (cy, c) in &dots {
+                pc.circle(inner.x + DOT_R, oy + cy, DOT_R, lin(*c));
             }
             for (ry, rh, text, rgb, rx, rsize) in &rows {
                 let top = oy + ry;
                 if top + rh < b.y || top > b.y + b.height {
                     continue;
                 }
-                line(pc, text, inner.x + rx, top, *rh, *rsize, *rgb, b);
+                line(pc, text, inner.x + rx, top, *rh, *rsize, *rgb, uncovered(b, self.menu, top, *rh));
             }
         });
         pc.well_rim(b, radius, cce_ui::layout::control_relief());
@@ -897,11 +1028,11 @@ impl View {
             let cols = ((c.width - 2.0 * inset) / cw) as usize;
             let mut ly = c.y + inset;
             for l in wrap(&p.text, cols).into_iter().take(4) {
-                line(pc, &l, c.x + inset, ly, line_h, size, fg(), c);
+                line(pc, &l, c.x + inset, ly, line_h, size, fg(), uncovered(c, self.menu, ly, line_h));
                 ly += line_h;
             }
             if p.question {
-                line(pc, "Answer it at the desk, or skip it.", c.x + inset, ly, line_h, small, dim(), c);
+                line(pc, "Answer it at the desk, or skip it.", c.x + inset, ly, line_h, small, dim(), uncovered(c, self.menu, ly, line_h));
             }
             for bt in [self.deny, self.always, self.allow] {
                 if let Some(w) = ui.get_widget(bt.id()) {
@@ -919,25 +1050,40 @@ impl View {
             let shown = &all[all.len().saturating_sub(DRAFT_LINES)..];
             let mut ly = s.y + inset * 0.5;
             if draft.is_empty() {
-                line(pc, "Message Claude…", s.x + inset, ly, line_h, size, dim(), s);
+                line(pc, "Message Claude…", s.x + inset, ly, line_h, size, dim(), uncovered(s, self.menu, ly, line_h));
             }
             for l in shown {
-                line(pc, l, s.x + inset, ly, line_h, size, fg(), s);
+                line(pc, l, s.x + inset, ly, line_h, size, fg(), uncovered(s, self.menu, ly, line_h));
                 ly += line_h;
             }
             if kb::is_up() {
-                let last = shown.last().map_or(0, |l| l.chars().count());
-                let cx = s.x + inset + last as f32 * cw + 1.0;
+                // After the last line's glyphs as shaped, not a count of
+                // characters times a width.
+                let last = shown.last().map_or(0.0, |l| shaped(l, &family, size).x_of(l.len()));
+                let cx = s.x + inset + last - 1.0;
                 let cy = s.y + inset * 0.5 + (shown.len().max(1) - 1) as f32 * line_h + line_h * 0.15;
                 pc.quad(Rect { x: cx, y: cy, width: 2.0, height: line_h * 0.7 }, lin(WAITING));
+            }
+        }
+        // The session menu, over everything.
+        if let Some(m) = self.menu {
+            pc.plate(m, (radius, radius, radius, radius), &Material::pane(), cce_ui::layout::bevel_width());
+            for b in &self.menu_rows {
+                if let Some(w) = ui.get_widget(b.id()) {
+                    if w.rect().2 > 0.0 {
+                        cce_ui::widget::painter::paint_root_into(ui, w, pc);
+                    }
+                }
             }
         }
     }
 }
 
-/// The face's character width (it is monospace).
+/// The face's character width (it is monospace): its advance as shaped.
+/// `measure_text_width` is an inked extent, short of the advance by the
+/// glyphs' side bearings.
 fn char_w(family: &str, size: f32) -> f32 {
-    (cce_ui::widget::display::measure_text_width("MMMMMMMMMM", family, size) / 10.0).max(4.0)
+    (shaped("MMMMMMMMMM", family, size).width / 10.0).max(4.0)
 }
 
 fn contains(r: Rect, x: f32, y: f32) -> bool {

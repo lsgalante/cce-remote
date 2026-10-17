@@ -435,14 +435,22 @@ deltas, so near-unity is the trackpad-like 1:1 feel. A 300px swipe used to scrol
 ## The Agent view: Code Agent's sessions on the phone
 
 The menu's "Code Agent sessions" row swaps the page for the Agent view
-(`src/web/agent.rs`): every session on disk by folder (archived ones left out), what a
+(`src/web/agent.rs`): every session on disk by folder (archived ones left out — even one
+still open in a window, which the desktop's sidebar keeps listed; one archived from the
+phone goes at once), what a
 Code Agent window is doing with each (working / needs you / open) or its age, a folder's
 "+ new"; a tap opens a session's transcript (replies as wrapped text, each tool call one
 row, a failed call's error), a waiting permission prompt's card (Deny / Always /
 Allow; a question takes only Skip — it wants answers the page does not offer), and a
-prompt strip with Keyboard and Send; Stop while a turn runs, Archive (confirmed) when
-none does. "‹ Trackpad" goes back. While it is on, `app.rs` hands it layout, paint and
+prompt strip with Keyboard and Send; a `⋯` menu with Stop (while a turn runs), Show on
+desktop (`open`), New session in its folder, and Archive (confirmed). Text draws above
+every shape, so rows under the open menu are clipped at its left edge (`uncovered`).
+"‹ Trackpad" goes back. While it is on, `app.rs` hands it layout, paint and
 events, and publishes the pad as empty, so `pad.rs` takes no touches.
+
+Carets and character widths come from cosmic-text's shaping (`app::shaped`, through
+`cce_ui::geometry_font_system`), never `measure_text_width`: that is an inked extent,
+short of the advance by the side bearings, and a caret placed by it drifted off the text.
 
 - **The second injection channel.** Code Agent (cce-code-agent) listens on
   `$XDG_RUNTIME_DIR/cce/code-agent/<pid>.sock` per window, one JSON request per

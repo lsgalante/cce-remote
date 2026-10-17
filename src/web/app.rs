@@ -205,6 +205,15 @@ fn label_font() -> (String, f32) {
     cce_ui::layout::control_label_font_parsed()
 }
 
+/// One line of `text` as the paint shapes it: where the caret stands at
+/// each char boundary. `measure_text_width` is an inked extent, not an
+/// advance, and a caret placed by it walked off the glyphs it followed.
+pub(super) fn shaped(text: &str, family: &str, size: f32) -> cce_ui::text::ShapedRun {
+    let Ok(mut fs) = cce_ui::geometry_font_system().try_lock() else { return Default::default() };
+    let buffer = cce_ui::text::get_text_buffer(&mut fs, text, size, Some(family));
+    cce_ui::text::shaped_run(&buffer, text, cce_ui::scale::scale_factor())
+}
+
 impl RemoteApp {
     fn set_view(on: bool) {
         state::with(|s| {
@@ -527,14 +536,12 @@ impl RemoteApp {
         };
         // From the left like a field; when the caret would fall past the
         // right edge, the line starts later, so the caret stays in view.
-        // Spaces are measured as `_` (the measure trims them, and the DE's
-        // face is monospace).
-        let width = |t: &str| if t.is_empty() { 0.0 } else { cce_ui::widget::display::measure_text_width(&t.replace(' ', "_"), &family, size) };
+        let run = shaped(&line, &family, size);
         let mut from = 0;
-        while from < caret && width(&line[from..caret]) > text_r.width {
+        while from < caret && run.x_of(caret) - run.x_of(from) > text_r.width {
             from += line[from..].chars().next().map_or(1, char::len_utf8);
         }
-        let x_at = |i: usize| text_r.x + width(&line[from..i.max(from)]);
+        let x_at = |i: usize| text_r.x + run.x_of(i.max(from)) - run.x_of(from);
         let ch = size * 1.1;
         let cy = r.y + (r.height - ch) / 2.0;
         if anchor != caret {
@@ -554,7 +561,7 @@ impl RemoteApp {
                 TextLayout { wrap_width: None, box_height: text_r.height, align_h: AlignH::Left, align_v: AlignV::Middle },
             );
         }
-        pc.quad(Rect { x: x_at(caret) + 1.0, y: cy, width: caret_w, height: ch }, RING);
+        pc.quad(Rect { x: x_at(caret) - caret_w / 2.0, y: cy, width: caret_w, height: ch }, RING);
     }
 
     fn paint_overlay(&self, pc: &mut PaintCtx, o: Rect) {
