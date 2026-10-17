@@ -36,7 +36,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # The page: cce-ui's browser shell, and the browser APIs the trackpad, the
 # keyboard, the two sockets and the frame decoder reach directly.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-cce-ui = { git = "https://github.com/lsgalante/cce-ui.git", rev = "dc5eee9ae67076a9945e1edd8ffc82714987f1ef" }
+cce-ui = { git = "https://github.com/lsgalante/cce-ui.git", rev = "bfafde060f994e35e7c1fcd5ae177125f6bcaa99" }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
