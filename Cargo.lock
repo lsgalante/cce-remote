@@ -184,10 +184,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "cce-core"
+version = "0.1.0"
+source = "git+https://github.com/lsgalante/cce-core.git?rev=f854e8f4b4fc2c9b32f9d37a75f028a41550667b#f854e8f4b4fc2c9b32f9d37a75f028a41550667b"
+dependencies = [
+ "libc",
+ "log",
+ "serde_json",
+ "web-time",
+]
+
+[[package]]
 name = "cce-remote"
 version = "0.1.0"
 dependencies = [
- "cce-core",
+ "cce-core 0.1.0 (git+https://github.com/lsgalante/cce-core.git?rev=f854e8f4b4fc2c9b32f9d37a75f028a41550667b)",
  "cce-ui",
  "flate2",
  "jpeg-encoder",
@@ -216,7 +227,7 @@ dependencies = [
  "bytemuck",
  "calloop",
  "calloop-wayland-source",
- "cce-core",
+ "cce-core 0.1.0 (git+https://github.com/lsgalante/cce-core.git?rev=cfe7a9307866896bdd1dd4319c44a6cb6f33db21)",
  "chrono",
  "cosmic-text",
  "cursor-icon",
