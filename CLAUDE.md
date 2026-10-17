@@ -400,7 +400,8 @@ width (`--kb-up`, which `app::safe_insets` reads), not against `innerHeight`.
 the home-screen app the top two, and the bottom two while the keyboard is down (the
 canvas then reaches the screen's bottom). No web API gives a screen's corner radius, so
 `app.js` looks it up by screen size (`SCREEN_CORNERS`, from iOS's private
-`_displayCornerRadius` as community tables collect it: 55 for 430×932) and sets
+`_displayCornerRadius` as community tables collect it: 55 for 430×932, confirmed to
+match on that iPhone) and sets
 `--corner-top` / `--corner-bottom`; `app::root_plate` draws `PaintCtx::root_plate`'s plate
 with those nominal radii swapped in. Elsewhere (a Safari tab, an unknown size) the DE's
 window radius holds — which on the page is cce-ui's built-in 12, since
