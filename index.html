@@ -370,19 +370,23 @@ pad.addEventListener("touchend", e => {
   if (touches.size < 2) pinch = null;
   if (touches.size > 0) return;
   clearTimeout(dragTimer);
+  const tap = !dragging && moved < 10 && Date.now() - startT < 300;
+  // A left tap's click goes over HTTP, which can overtake the WS; drop the
+  // few px of jitter the tap moved rather than let it land after the click.
+  if (tap && maxFingers < 2) { pendDx = pendDy = 0; }
   flush();
   if (dragging) { send("b left up"); dragging = false; }
-  else if (moved < 10 && Date.now() - startT < 300) {
+  else if (tap) {
     // Identical in both modes: a tap clicks where the cursor IS — it never
     // warps the pointer to the tapped spot. View mode is the trackpad with a
     // picture behind it, not a touchscreen.
-    send(maxFingers >= 2 ? "b right click" : "b left click");
+    if (maxFingers >= 2) send("b right click"); else tapClick();
   }
   maxFingers = 0;
 }, { passive: false });
 pad.addEventListener("touchcancel", () => { touches.clear(); clearTimeout(dragTimer); if (dragging) { send("b left up"); dragging = false; } maxFingers = 0; });
 
-document.getElementById("lclick").addEventListener("click", () => send("b left click"));
+document.getElementById("lclick").addEventListener("click", tapClick);
 document.getElementById("rclick").addEventListener("click", () => send("b right click"));
 
 // ── View mode + the ⋯ menu ───────────────────────────────────────────
@@ -548,6 +552,26 @@ function setField(open) {
   updTypebar();
 }
 typebar.addEventListener("click", () => { kb.focus(); kbByField = true; });
+// A left click that opens a field raises the keyboard straight away. That has
+// to happen inside the tap's own handler, so the click is a SYNCHRONOUS
+// request to /click, which answers once it knows whether a field opened
+// (within 150ms; the page is frozen that long when one did not). Only a
+// field the click NEWLY opened counts: a tap into one already open leaves
+// the type bar to do it, since app repaints make "the click touched the
+// field" indistinguishable from any other click. The ti 1 that follows then
+// finds the keyboard already up.
+function tapClick() {
+  if (!authed) return;
+  let opened = false;
+  try {
+    const x = new XMLHttpRequest();
+    x.open("POST", "/click", false);
+    x.setRequestHeader("X-Pin", localStorage.getItem("cce-remote-pin") || "");
+    x.send();
+    opened = x.status === 200 && x.responseText === "1";
+  } catch (_) {}
+  if (opened && document.activeElement !== kb) { kb.focus(); kbByField = true; }
+}
 // US-layout char → [evdev keycode, needs shift]
 const KEYS = {};
 "abcdefghijklmnopqrstuvwxyz".split("").forEach((c, i) => {

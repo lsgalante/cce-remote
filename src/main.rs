@@ -58,6 +58,13 @@ const DEFAULT_PORT: u16 = 17017;
 /// opened or closed — the latency of the page's "tap to type" prompt.
 const FIELD_POLL: Duration = Duration::from_millis(100);
 
+/// How long `/click` waits for the click to open a text field before
+/// answering no. The page is frozen inside the tap for this long whenever a
+/// click opens nothing, so it is kept short: activations measured 1-16ms
+/// after the click (cce-ui, shadow session, 2026-10-17), and one that misses
+/// the window only costs the user the "tap to type" bar instead.
+const CLICK_FIELD_WAIT: Duration = Duration::from_millis(150);
+
 /// `$WAYLAND_DISPLAY`, else `wayland-0`: run from a service or a login shell
 /// with no display set, this still finds the session's compositor.
 fn display() -> String {
@@ -592,28 +599,57 @@ fn handle_wstream(stream: TcpStream, pin: &str, ip: std::net::IpAddr, limiter: &
     let _ = ws.close(None);
 }
 
+/// The `X-Pin` header gate shared by `/shot` and `/click`: rate limit, then
+/// the PIN. Answers 429 or 403 itself and returns false when the request may
+/// not proceed. Header only: neither is loaded as an `<img src>`, so unlike
+/// `/stream` there is no reason to let the PIN travel in a URL (where it
+/// lands in logs).
+fn header_gate(stream: &mut TcpStream, request_head: &str, pin: &str, ip: std::net::IpAddr, limiter: &RateLimiter) -> bool {
+    if !limiter.allow(ip, std::time::Instant::now()) {
+        let _ = write!(stream, "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 30\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        return false;
+    }
+    if !header_pin_ok(request_head, pin) {
+        limiter.record_failure(ip, std::time::Instant::now());
+        let _ = write!(stream, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        return false;
+    }
+    limiter.record_success(ip);
+    true
+}
+
 fn handle_http(mut stream: TcpStream, request_head: &str, pin: &str, ip: std::net::IpAddr, limiter: &RateLimiter) {
     if request_head.starts_with("GET /stream") {
         handle_stream(stream, request_head, pin, ip, limiter);
+        return;
+    }
+    // /click: the page's left tap, answering whether it opened a desktop
+    // text field. The page waits on it synchronously because iOS raises the
+    // keyboard only from inside the tap's own handler; a WS round trip
+    // returns after the tap is over. The click itself is the fixed
+    // `b left click` through translate(); the request carries nothing else.
+    if request_head.starts_with("POST /click ") {
+        if !header_gate(&mut stream, request_head, pin, ip, limiter) {
+            return;
+        }
+        let before = textfield::opened();
+        for cmd in translate("b left click").unwrap_or_default() {
+            let _ = control_command(&cmd);
+        }
+        let opened = if textfield::wait_opened(before, CLICK_FIELD_WAIT) { "1" } else { "0" };
+        let _ = write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nCache-Control: no-store\r\nContent-Length: 1\r\nConnection: close\r\n\r\n{opened}"
+        );
         return;
     }
     // /shot: the focused window's screenshot, PIN-gated via the X-Pin header.
     // A debug endpoint now — the page's live view rides /wstream and nothing
     // in the page fetches this.
     if request_head.starts_with("GET /shot") {
-        if !limiter.allow(ip, std::time::Instant::now()) {
-            let _ = write!(stream, "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 30\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        if !header_gate(&mut stream, request_head, pin, ip, limiter) {
             return;
         }
-        // Header only: nothing loads this as an <img src>, so unlike /stream
-        // there is no reason to let the PIN travel in a URL (where it lands in
-        // logs).
-        if !header_pin_ok(request_head, pin) {
-            limiter.record_failure(ip, std::time::Instant::now());
-            let _ = write!(stream, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-            return;
-        }
-        limiter.record_success(ip);
         match take_screenshot() {
             Some((bytes, (id, x, y, w, h))) => {
                 let _ = write!(

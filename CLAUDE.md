@@ -72,7 +72,8 @@ differently, because of a browser constraint that shaped them when the page stil
 used both: `/shot` takes an `X-Pin` header, but `/stream` accepts `?pin=` in the query
 string, because an `<img src>` cannot carry headers. The page uses NEITHER today — the
 live view rides `/wstream` — so both are debug endpoints now, and the split survives
-for the curl recipes below rather than for a browser.
+for the curl recipes below rather than for a browser. The one HTTP endpoint the page
+does use, `POST /click`, takes the header like `/shot` (`header_gate` serves both).
 
 All three gates are pure functions — `auth_frame_ok`, `header_pin_ok`, `query_pin_ok`,
 all over `pin_matches` — so they are unit-tested rather than only reachable through a
@@ -215,10 +216,11 @@ passes `overlay_cursor=1`, so on that fallback you see the real cursor *and* the
 file** — verified: a `/shot` leaves nothing new in `~/Pictures/screenshots`. Remote
 viewing must not accumulate captures on disk.
 
-## The "tap to type" bar: the server as a listen-only input method
+## The phone keyboard follows desktop text fields: a listen-only input method
 
-When a text field on the desktop opens for typing, the page shows a bar that opens the
-phone keyboard (since 2026-10-17). The signal is the compositor's text-input relay
+A left tap on the trackpad that opens a desktop text field raises the phone keyboard;
+a field open by any other route shows a "tap to type" bar that does (both since
+2026-10-17). The signal is the compositor's text-input relay
 (`input_relay.rs`): it hands `activate`/`deactivate` to the seat's one
 `input-method-v2` client, and `textfield.rs` registers as that client at startup. It
 **commits nothing, sets no preedit and grabs no keyboard** — typing still goes through
@@ -237,9 +239,24 @@ GTK, Qt and browser fields.
 - **A close waits 250ms** (`CLOSE_GRACE`, matching `osk.rs`'s `HIDE_DELAY_MS`): moving
   between fields disables one and enables the next, and the bar must not flicker.
   An open is sent at once.
-- **The page cannot raise the keyboard itself.** iOS (and mostly Android) open it only
-  from the user's own tap, never from a WS message — hence a bar to tap rather than
-  `kb.focus()` on `ti 1`. A close blurs the keyboard **only if the bar raised it**; one
+- **The page can raise the keyboard only inside a tap.** iOS (and mostly Android) open
+  it only from the user's own gesture handler, never from a WS message — so `ti 1`
+  alone shows the bar rather than calling `kb.focus()`.
+- **So a left tap's click is a SYNCHRONOUS `POST /click`.** The server performs the
+  fixed `b left click` (through `translate()`), then waits on `textfield::wait_opened`
+  for an activation, up to `CLICK_FIELD_WAIT` (150ms), and answers `1`/`0`; the page,
+  still inside `touchend`, focuses the keyboard on `1`. Activations measured 1-16ms
+  after the click, so a `1` costs almost nothing — but **every tap that opens nothing
+  freezes the page for the full wait** plus a round trip. That is the price; keep the
+  wait short, since a miss only degrades to the bar. The tap's few px of move jitter
+  are dropped rather than flushed, because the HTTP click could overtake them on the WS.
+- **Only a NEW activation counts** (`Field::opened`, bumped on a `done` whose batch
+  carried `activate`; a switch between fields counts). Tapping a field that is already
+  open answers `0`, and the bar covers it. "Any update while open" was measured as the
+  alternative and rejected: a click inside an open field does produce one, but so does
+  a click on a button that makes the app repaint, so the keyboard would pop on ordinary
+  clicks in any app whose field stays open (the text editor's always is).
+- A close blurs the keyboard **only if a field raised it** (the bar or `/click`); one
   opened with the keyboard button stays, as `osk.rs` leaves a hand-summoned board.
 
 Not done, and why: `commit_string` would type Unicode the keycode table cannot, but it
@@ -304,11 +321,11 @@ The awkward part: **there is no WebSocket client on this machine** (no `websocat
 be driven from a real phone, or by writing a throwaway client.
 
 The pure functions are the exception, and they are where the crate's invariants are
-actually enforced, so they carry all the tests (`cargo test -p cce-remote`, 31 of them:
-21 in `main.rs`, 6 in `stream.rs`, 4 in `textfield.rs`) — `translate()` for what a paired
+actually enforced, so they carry all the tests (`cargo test -p cce-remote`, 32 of them:
+21 in `main.rs`, 6 in `stream.rs`, 5 in `textfield.rs`) — `translate()` for what a paired
 client may say, the three PIN gates for who is paired at all, in `stream.rs` the `Slot`'s
 latest-wins semantics plus `adapt()`/`LADDER`, and in `textfield.rs` the field-switch
-grace (`decide`). They cover the accepted shapes and — more to the point —
+grace (`decide`) and the click's activation wait (`wait_opened`). They cover the accepted shapes and — more to the point —
 everything that
 must be refused: unknown verbs *including the compositor's own command names*,
 malformed and missing arguments, `wf` targets outside `safe_token`, unwhitelisted `cmd`

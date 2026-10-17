@@ -17,7 +17,7 @@
 //! which applies the same field-switch grace `osk.rs` does before telling the
 //! page a field closed — see [`decide`].
 
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use wayland_client::globals::{registry_queue_init, GlobalListContents};
@@ -43,15 +43,49 @@ struct Field {
     active: bool,
     /// When `active` last changed; None until it first does.
     since: Option<Instant>,
+    /// Count of activations: a field enabled, or focus moving to another.
+    /// Bumped even when `active` was already true (a field switch), which
+    /// is what lets `/click` tell "this click opened a field" from "one was
+    /// already open".
+    opened: u64,
 }
 
-static FIELD: Mutex<Field> = Mutex::new(Field { active: false, since: None });
+static FIELD: Mutex<Field> = Mutex::new(Field { active: false, since: None, opened: 0 });
+/// Signalled on every activation, for [`wait_opened`].
+static OPENED: Condvar = Condvar::new();
 
-fn publish(active: bool) {
+/// Apply one `done`: the field's state, and whether that batch carried an
+/// `activate`.
+fn publish(active: bool, activated: bool) {
     let mut f = FIELD.lock().unwrap();
     if f.active != active {
-        *f = Field { active, since: Some(Instant::now()) };
+        f.active = active;
+        f.since = Some(Instant::now());
     }
+    if active && activated {
+        f.opened += 1;
+        OPENED.notify_all();
+    }
+}
+
+/// The activation count, to hand [`wait_opened`] before acting.
+pub fn opened() -> u64 {
+    FIELD.lock().unwrap().opened
+}
+
+/// Wait up to `timeout` for an activation after `opened()` read `after`.
+/// True as soon as one happens.
+pub fn wait_opened(after: u64, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    let mut f = FIELD.lock().unwrap();
+    while f.opened == after {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        f = OPENED.wait_timeout(f, left).unwrap().0;
+    }
+    true
 }
 
 /// What a connection that last told its page `sent` should send now, if
@@ -84,7 +118,7 @@ pub fn spawn_watcher() {
         let mut last_err = String::new();
         loop {
             let err = watch().err().unwrap_or_else(|| "connection closed".into());
-            publish(false);
+            publish(false, false);
             // Retrying every RETRY would repeat the same line forever while
             // another input method holds the seat; say it once.
             if err != last_err {
@@ -100,6 +134,8 @@ pub fn spawn_watcher() {
 struct ImState {
     /// `activate`/`deactivate` are double-buffered until `done`.
     pending: bool,
+    /// This batch carried an `activate`.
+    activated: bool,
     unavailable: bool,
 }
 
@@ -128,9 +164,15 @@ impl Dispatch<ZwpInputMethodV2, ()> for ImState {
         _: &QueueHandle<Self>,
     ) {
         match event {
-            zwp_input_method_v2::Event::Activate => state.pending = true,
+            zwp_input_method_v2::Event::Activate => {
+                state.pending = true;
+                state.activated = true;
+            }
             zwp_input_method_v2::Event::Deactivate => state.pending = false,
-            zwp_input_method_v2::Event::Done => publish(state.pending),
+            zwp_input_method_v2::Event::Done => {
+                publish(state.pending, state.activated);
+                state.activated = false;
+            }
             zwp_input_method_v2::Event::Unavailable => state.unavailable = true,
             _ => {}
         }
@@ -183,6 +225,27 @@ mod tests {
         let t0 = Instant::now();
         assert_eq!(decide(false, Some(t0), true, t0 + Duration::from_millis(50)), None);
         assert_eq!(decide(true, Some(t0 + Duration::from_millis(60)), true, t0 + Duration::from_millis(100)), None);
+    }
+
+    #[test]
+    fn a_click_hears_an_activation_or_times_out() {
+        // The only test that touches the statics.
+        let before = opened();
+        let t0 = Instant::now();
+        assert!(!wait_opened(before, Duration::from_millis(30)));
+        assert!(t0.elapsed() >= Duration::from_millis(30));
+        // A batch that keeps a field open without an activate is not one.
+        publish(true, false);
+        assert!(!wait_opened(before, Duration::from_millis(10)));
+        let waker = std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(20));
+            publish(true, true);
+        });
+        let t0 = Instant::now();
+        assert!(wait_opened(before, Duration::from_secs(5)));
+        assert!(t0.elapsed() < Duration::from_secs(1), "woken, not timed out");
+        waker.join().unwrap();
+        publish(false, false);
     }
 
     #[test]
